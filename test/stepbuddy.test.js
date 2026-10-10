@@ -696,6 +696,24 @@ test('players choose a personality at sign-up and can change it', async () => {
   db.close();
 });
 
+test('a profile picture is a small jpeg, png or webp data URL and can be removed', async () => {
+  const login = (await call('POST', '/login', { username: 'poser' }, null)).data;
+  const auth = login.token;
+  assert.equal(login.user.avatar, null);
+  const picture = `data:image/jpeg;base64,${Buffer.from('not really a jpeg').toString('base64')}`;
+  assert.equal((await call('PATCH', '/me', { avatar: picture }, auth)).data.user.avatar, picture);
+  assert.equal((await call('GET', '/me', null, auth)).data.user.avatar, picture);
+
+  for (const bad of [
+    'https://example.com/me.jpg', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:text/html;base64,PGI+', 42,
+    `data:image/png;base64,${'A'.repeat(8004)}`, 'data:image/png;base64,"><script>',
+  ]) {
+    assert.equal((await call('PATCH', '/me', { avatar: bad }, auth)).status, 400, String(bad).slice(0, 30));
+  }
+  assert.equal((await call('GET', '/me', null, auth)).data.user.avatar, picture);
+  assert.equal((await call('PATCH', '/me', { avatar: null }, auth)).data.user.avatar, null);
+});
+
 test('a resting beast can be renamed and given a personality, but only by its owner', async () => {
   const login = (await call('POST', '/login', { username: 'keeper' }, null)).data;
   const auth = login.token;

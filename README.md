@@ -10,7 +10,7 @@ StepBuddy is a mobile-first web app (installable as a PWA) with a small Node ser
 
 | Tab | What you do there |
 |---|---|
-| **Home** | See your buddy, its mood and today's steps. Tap it to chat, and dress it from the wardrobe under it. |
+| **Home** | See your buddy, its mood and today's steps. Tap the beast to make it talk, and dress it from the wardrobe under it. |
 | **Walk** | Start a walk. The phone's accelerometer counts your steps while the app is open. |
 | **Map** | Watch your buddy walk on a real map of where you are, following your GPS. |
 | **Store** | Spend points on upgrades and cosmetics, and pick up coin packs. |

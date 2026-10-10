@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { SPECIES, buddySvg, cosmeticIcon, stageName } from '../buddy.js';
-import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
+import { avatarHtml, buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
@@ -80,11 +80,12 @@ export const pointIcon = `<svg class="point-icon" viewBox="0 0 8 8" shape-render
 
 export function mount(el) {
   let busy = false;
+  let thinking = false; // waiting for the beast's line after a tap
   let items = null; // everything in the store, marked with what the player owns
   let wardrobeSlot = null; // the wardrobe slot that is open, if any
 
   function render() {
-    const { user, buddy, resting, record } = app.state;
+    const { user, buddy, resting } = app.state;
     const shelfScroll = el.querySelector('.wardrobe-shelf')?.scrollLeft ?? 0;
     const today = app.todaySteps;
     const speaking = app.spoken && app.spoken.until > Date.now();
@@ -100,9 +101,8 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <button class="chip" id="profile-btn" aria-label="Open profile">
-          <span class="avatar">${escapeHtml(user.username[0].toUpperCase())}</span>
-          <span class="chip-text"><b>${escapeHtml(user.username)}</b>
-            <small>${record.wins}W · ${record.losses}L</small></span>
+          ${avatarHtml(user)}
+          <span class="chip-text"><b>${escapeHtml(user.username)}</b></span>
         </button>
         <div class="topbar-balances">
           <div class="balance" aria-label="${user.points} Stride Points">${pointIcon}<b>${fmt(user.points)}</b></div>
@@ -115,8 +115,11 @@ export function mount(el) {
           <span class="hud-badge hud-level">Lv ${buddy.level}</span>
           <span class="hud-badge" aria-label="${today} steps today">${icons.boot}${fmt(today)}</span>
         </div>
-        <div class="bubble home-bubble" aria-live="polite" ${speaking ? '' : 'hidden'}>${speaking ? escapeHtml(app.spoken.text) : ''}</div>
-        ${buddySvg(buddy, { className: `is-idle ${today === 0 && !walk.walking ? 'is-sleepy' : ''}` })}
+        <div class="bubble home-bubble ${thinking && !speaking ? 'is-thinking' : ''}" aria-live="polite" ${
+          speaking || thinking ? '' : 'hidden'}>${speaking ? escapeHtml(app.spoken.text) : '<span class="dots">...</span>'}</div>
+        <button class="beast-tap" id="talk-btn" aria-label="Talk to ${escapeHtml(buddy.name)}">
+          ${buddySvg(buddy, { className: `is-idle ${today === 0 && !walk.walking ? 'is-sleepy' : ''}` })}
+        </button>
         <div class="nameplate">
           <div>
             <b>${escapeHtml(buddy.name)}</b>
@@ -126,10 +129,6 @@ export function mount(el) {
             <span class="stat-badge is-attack" aria-label="Attack ${buddy.attack}">${icons.sword}${buddy.attack}</span>
             <span class="stat-badge is-evasion" aria-label="Evasion ${buddy.evasion}">${icons.dash}${buddy.evasion}</span>
           </div>
-          <button class="btn btn-pink icon-talk" id="talk-btn" aria-label="Talk to ${escapeHtml(buddy.name)}">
-            <svg viewBox="0 0 8 8" width="20" height="20" shape-rendering="crispEdges" aria-hidden="true"><path
-              fill="currentColor" d="M1 1h6v4h-3v1h-1v1h-1v-2h-1z"/></svg>
-          </button>
         </div>
         ${evolveHtml}
         ${wardrobeHtml(buddy, resting, items, wardrobeSlot)}
@@ -189,10 +188,13 @@ export function mount(el) {
     }
   }
 
-  async function talk(button) {
-    button.disabled = true;
-    button.classList.add('is-loading');
+  // Tapping the beast makes it talk. It shows a thinking bubble until its line arrives.
+  async function talk() {
+    if (thinking) return;
+    thinking = true;
+    render();
     const text = await buddySay('chat');
+    thinking = false;
     if (text) {
       app.say(text);
       // The first talk gives the buddy its personality; fetch it so the traits show.
@@ -200,9 +202,7 @@ export function mount(el) {
     } else {
       toast('Your buddy is feeling shy. Try again in a moment.', 'warn');
     }
-    // The screen may have re-rendered while waiting; the old button is gone then.
-    button.disabled = false;
-    button.classList.remove('is-loading');
+    render();
   }
 
   const onClick = (event) => {
@@ -220,8 +220,7 @@ export function mount(el) {
       return toast(`${equipBtn.dataset.wearer} is wearing that. Take it off them first.`, 'warn');
     }
     if (equipBtn) return equip(equipBtn.dataset.equip);
-    const talkBtn = event.target.closest('#talk-btn');
-    if (talkBtn && !talkBtn.disabled) return talk(talkBtn);
+    if (event.target.closest('#talk-btn')) return talk();
     if (event.target.closest('#profile-btn')) return openProfile();
   };
   el.addEventListener('click', onClick);

@@ -36,6 +36,9 @@ const BUDDY_COLUMNS = [
   'personality', 'rest_until',
 ];
 
+// Small enough to fit in a request, and only formats that are plain pictures (no SVG).
+const AVATAR_PATTERN = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]{1,8000}={0,2}$/;
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -164,7 +167,7 @@ export async function createApp({ dbFile, dataDir }) {
     return {
       user: {
         id: user.id, username: user.username, points: user.points, coins: user.coins,
-        totalSteps: user.total_steps, dailyGoal: user.daily_goal,
+        totalSteps: user.total_steps, dailyGoal: user.daily_goal, avatar: user.avatar ?? null,
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
@@ -304,6 +307,13 @@ export async function createApp({ dbFile, dataDir }) {
           throw new HttpError(400, 'Daily goal must be between 500 and 50,000 steps');
         }
         await db.run('UPDATE users SET daily_goal = ? WHERE id = ?', [goal, userId]);
+      }
+      // A profile picture arrives already shrunk by the app, as a data: URL; null removes it.
+      if (body.avatar !== undefined) {
+        if (body.avatar !== null && !AVATAR_PATTERN.test(String(body.avatar))) {
+          throw new HttpError(400, 'That picture can\'t be used. Try another one');
+        }
+        await db.run('UPDATE users SET avatar = ? WHERE id = ?', [body.avatar, userId]);
       }
       // The name and personality go to the beast walking with the player, or
       // to one of their resting beasts when beastId names it.

@@ -150,6 +150,10 @@ function openSqlite(file) {
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'coins')) {
     db.exec('ALTER TABLE users ADD COLUMN coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0)');
   }
+  // The player's profile picture: a small image as a data: URL, or NULL for none.
+  if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'avatar')) {
+    db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
+  }
   // When a beast that lost a battle can fight again; it travels with the beast.
   for (const table of ['buddies', 'resting_buddies']) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((col) => col.name === 'rest_until')) {
@@ -319,6 +323,7 @@ const PG_SCHEMA = `
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS species TEXT NOT NULL DEFAULT 'dragon';
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS personality TEXT;
   ALTER TABLE ready_lines ADD COLUMN IF NOT EXISTS mood TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE resting_buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0);
