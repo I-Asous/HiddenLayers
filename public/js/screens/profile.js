@@ -1,4 +1,4 @@
-import { api, setToken } from '../api.js';
+import { api } from '../api.js';
 import { mountStepHistory, parse, shortDate } from '../charts.js';
 import {
   avatarHtml, distanceUnits, escapeHtml, fmt, fmtDistance, musicSettings, setDistanceUnits, setMusic, toast,
@@ -239,7 +239,6 @@ export async function openProfile() {
     await walk.stop();
     walk.reset();
     await api('/logout', { method: 'POST' }).catch(() => {});
-    setToken(null);
     close();
     app.clear();
     app.dispatchEvent(new Event('signedout'));

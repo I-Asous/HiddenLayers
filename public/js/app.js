@@ -1,4 +1,4 @@
-import { api, handleSignedOut, hasToken, setToken } from './api.js';
+import { api, clearLegacyToken, handleSignedOut, legacyToken } from './api.js';
 import { toast } from './fx.js';
 import { app } from './state.js';
 import { walk } from './steps.js';
@@ -45,12 +45,33 @@ const LOGIN_INTRO = {
   login: 'Welcome back! Your buddy is waiting.',
   signup: 'Hatch a mythical beast and raise it with every step you take.',
   beast: 'A mystery egg is waiting for you. Walk to find out what hatches!',
+  claim: 'Accounts now need a password. Set one to keep your buddy safe.',
 };
 
-// "login" asks returning players for just a username. New players get two
-// steps: "signup" picks a username that nobody has yet, then "beast" names the
-// buddy that will hatch from their random egg.
-function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUsername()) {
+const PASSWORD_RULES = 'At least 8 characters, with a letter and a number.';
+
+// The same rules the server checks (server/auth.js), so most mistakes show
+// before anything is sent.
+function passwordProblem(password, confirm, username) {
+  if (password.length < 8) return 'Password must be at least 8 characters';
+  if (password.length > 128) return 'Password must be at most 128 characters';
+  if (!/\p{L}/u.test(password) || !/\p{N}/u.test(password)) return 'Password needs at least one letter and one number';
+  if (password.toLowerCase() === username.toLowerCase()) return 'Password can\'t be your username';
+  if (password !== confirm) return 'Passwords don\'t match';
+  return null;
+}
+
+const passwordField = (name, label, autocomplete) => `
+        <label>${label}
+          <input name="${name}" type="password" required minlength="8" maxlength="128" autocomplete="${autocomplete}">
+        </label>`;
+
+// "login" asks returning players for their username and password. New players
+// get two steps: "signup" picks a free username and a password (typed twice),
+// then "beast" names the buddy that will hatch from their random egg. "claim"
+// is for accounts made before passwords: the device that still holds the old
+// sign-in sets the password once.
+function showLogin(mode = legacyToken() ? 'claim' : lastUsername() ? 'login' : 'signup', username = lastUsername()) {
   current?.screen.destroy();
   current = null;
   username = escapeAttr(username);
@@ -59,7 +80,13 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
           <input name="username" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_]+" value="${username}"
             autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="e.g. sam_walks">
         </label>`;
-  const beastFields = `
+  const fields = {
+    login: usernameField + passwordField('password', 'Password', 'current-password'),
+    signup: usernameField
+      + passwordField('password', 'Choose a password', 'new-password')
+      + passwordField('confirmPassword', 'Type it again', 'new-password')
+      + `<p class="hint hint-top">${PASSWORD_RULES}</p>`,
+    beast: `
         <p class="hint hint-top">Username: ${username}</p>
         <label>Name your buddy
           <input name="buddyName" maxlength="16" autocomplete="off" placeholder="Buddy">
@@ -68,18 +95,22 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
           <select name="personality">
             <option value="" selected>Surprise me</option>
           </select>
-        </label>`;
+        </label>`,
+    claim: (username ? `<p class="hint hint-top">Username: ${username}</p>` : '')
+      + passwordField('password', 'New password', 'new-password')
+      + passwordField('confirmPassword', 'Type it again', 'new-password')
+      + `<p class="hint hint-top">${PASSWORD_RULES}</p>`,
+  }[mode];
   root.innerHTML = `
     <main class="login">
       <h1>Wanderling</h1>
       <p>${LOGIN_INTRO[mode]}</p>
       <form id="login-form">
-        ${mode === 'beast' ? beastFields : usernameField}
-        <button class="btn btn-primary btn-block btn-xl">${{ login: 'Log in', signup: 'Next', beast: 'Start' }[mode]}</button>
-        ${mode === 'beast' ? '' : '<p class="hint">No password needed.</p>'}
+        ${fields}
+        <button class="btn btn-primary btn-block btn-xl">${{ login: 'Log in', signup: 'Next', beast: 'Start', claim: 'Set password' }[mode]}</button>
       </form>
       <button class="btn btn-ghost btn-block" id="login-switch">
-        ${{ login: 'New here? Hatch a buddy', signup: 'Already have a buddy? Log in', beast: 'Back' }[mode]}
+        ${{ login: 'New here? Hatch a buddy', signup: 'Already have a buddy? Log in', beast: 'Back', claim: 'Use a different account' }[mode]}
       </button>
     </main>`;
   const form = root.querySelector('#login-form');
@@ -90,51 +121,77 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
     }).catch(() => {});
   }
   root.querySelector('#login-switch').addEventListener('click', () => {
-    showLogin(mode === 'signup' ? 'login' : 'signup', typedUsername());
+    if (mode === 'claim') clearLegacyToken();
+    if (mode !== 'beast') pendingPassword = null;
+    showLogin({ login: 'signup', signup: 'login', beast: 'signup', claim: 'login' }[mode], typedUsername());
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const data = new FormData(form);
     const button = form.querySelector('button');
+    const password = String(data.get('password') ?? '');
+    const confirmPassword = String(data.get('confirmPassword') ?? '');
+    if (mode === 'signup' || mode === 'claim') {
+      const problem = passwordProblem(password, confirmPassword, typedUsername());
+      if (problem) return toast(problem, 'warn');
+    }
     button.disabled = true;
     try {
       if (mode === 'signup') {
         const { available } = await api(`/username?name=${encodeURIComponent(typedUsername())}`);
-        if (available) return showLogin('beast', typedUsername());
+        if (available) {
+          // Kept in memory only, until the beast step sends it.
+          pendingPassword = { password, confirmPassword };
+          return showLogin('beast', typedUsername());
+        }
         toast('That username is taken. Try another one.', 'warn');
         button.disabled = false;
         return;
       }
-      const result = await api('/login', {
-        method: 'POST',
-        body: {
-          mode: mode === 'login' ? 'login' : 'signup',
-          username: typedUsername(),
-          buddyName: data.get('buddyName'),
-          personality: data.get('personality'),
-        },
-      });
-      setToken(result.token);
+      let result;
+      if (mode === 'login') {
+        result = await api('/login', { method: 'POST', body: { username: typedUsername(), password } });
+      } else if (mode === 'claim') {
+        result = await api('/claim', { method: 'POST', body: { legacyToken: legacyToken(), password, confirmPassword } });
+        clearLegacyToken();
+      } else {
+        if (!pendingPassword) return showLogin('signup', typedUsername());
+        result = await api('/signup', {
+          method: 'POST',
+          body: {
+            username: typedUsername(), ...pendingPassword,
+            buddyName: data.get('buddyName'), personality: data.get('personality'),
+          },
+        });
+        pendingPassword = null;
+      }
       try {
-        localStorage.setItem(USERNAME_KEY, typedUsername());
+        localStorage.setItem(USERNAME_KEY, result.username ?? result.user.username);
       } catch {}
       app.setState(result);
       showApp();
     } catch (err) {
-      if (err.status === 404 && mode === 'login') {
-        toast('No buddy with that username yet. Hatch one!', 'warn');
-        return showLogin('signup', typedUsername());
+      // The old sign-in on this device is gone or already used: sign in normally.
+      if (err.status === 403 && mode === 'claim') {
+        clearLegacyToken();
+        toast(err.message, 'warn');
+        return showLogin('login', typedUsername());
       }
       // Someone took the name while this player was choosing their beast.
       if (err.status === 409 && mode === 'beast') {
         toast('That username was just taken. Try another one.', 'warn');
+        pendingPassword = null;
         return showLogin('signup', typedUsername());
       }
       toast(err.message, 'warn');
+      if (mode === 'login') form.elements.password.value = '';
       button.disabled = false;
     }
   });
 }
+
+// The password chosen on the sign-up step, held until the beast step submits.
+let pendingPassword = null;
 
 function showApp() {
   root.innerHTML = `
@@ -197,13 +254,14 @@ setInterval(refreshOnNewDay, 30_000);
 
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-  if (!hasToken()) return showLogin();
+  // The session cookie can't be read from here, so ask the server who this is.
   try {
     await app.refresh();
   } catch (err) {
     if (err.status === 401) return; // handleSignedOut already showed the login
     root.innerHTML = `<main class="login"><h1>Wanderling</h1><p>Can't reach the server. Check your connection.</p>
-      <button class="btn btn-primary" onclick="location.reload()">Try again</button></main>`;
+      <button class="btn btn-primary" id="retry">Try again</button></main>`;
+    root.querySelector('#retry').addEventListener('click', () => location.reload());
     return;
   }
   showApp();

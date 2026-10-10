@@ -66,14 +66,29 @@ Every key is optional. Each one you leave out swaps in a fallback, so the app st
 | `GOOGLE_MAPS_MAP_ID` | Tilted 3D map with buildings | Flat retro-styled map |
 | `TIGER_DATABASE_URL` | Tiger Data (Postgres) as the database | Local SQLite |
 
+| `APP_ORIGIN` | The site's public address, e.g. `https://wanderling.up.railway.app`. Only needed if a proxy rewrites the `Host` header and every action starts failing with "Cross-site request" | Taken from the request |
+
 If `TIGER_DATABASE_URL` is set but unreachable at startup (for example, the service is paused), the server logs it and falls back to SQLite.
+
+## Accounts and security
+
+- **Passwords** must be 8–128 characters with a letter and a number, can't be the username or a very common password, and are typed twice at sign-up. They're stored only as salted scrypt hashes.
+- **Sessions** are random tokens in an `HttpOnly`, `SameSite=Strict` cookie that lasts a year. Over HTTPS the cookie is also `Secure` and named with the `__Host-` prefix. The database stores only a SHA-256 hash of each token, so a database leak can't be used to sign in.
+- **Every API call needs a valid session**, except sign-up, login, the username check and the personality list. Voice clips need one too.
+- **Forged requests are refused.** Anything that changes data must carry the `x-wanderling` header and come from the site's own origin.
+- **Brute force is limited.** After 10 wrong passwords a username is locked for 15 minutes, and each address gets 30 sign-in or sign-up attempts per 15 minutes.
+- **Response headers:** a Content Security Policy, plus anti-framing, `nosniff` and HSTS over HTTPS.
+- **Accounts from before passwords** have no password, so nobody can sign into them. The device that still holds such an account's old sign-in can use it once to set a password. Demo players (`mira`, `theo`, `ana`) can't be signed into.
+
+The code lives in `server/auth.js`.
 
 ## Project layout
 
 ```
 server/
   index.js      entry point: loads .env, opens the DB, starts the HTTP server
-  app.js        routes (/api/...), static files, auth
+  app.js        routes (/api/...), static files, session checks
+  auth.js       password hashing, session cookies, forged-request checks, rate limits, security headers
   game.js       pure game rules: points, levels, moods, battles, store items
   db.js         one interface over Tiger Data (Postgres) or SQLite, plus seeding
   ai.js         Gemini personalities/lines and ElevenLabs voice

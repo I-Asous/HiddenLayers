@@ -1,12 +1,16 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
   waitForSpeech,
 } from './ai.js';
+import {
+  SESSION_TTL_MS, burnPasswordCheck, checkSameOrigin, clientIp, hashPassword, hashToken, newSessionToken, passwordProblem,
+  rateLimiter, readSessionToken, securityHeaders, sessionCookie, verifyPassword,
+} from './auth.js';
 import { DAY_MS, DEMO_USERNAMES, dayLabel, isDemoUser, localDay, openDb, stepsByDay, transaction } from './db.js';
 import { distanceM } from '../public/js/geo.js';
 import {
@@ -45,6 +49,21 @@ const BUDDY_COLUMNS = [
 // Small enough to fit in a request, and only formats that are plain pictures (no SVG).
 const AVATAR_PATTERN = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]{1,8000}={0,2}$/;
 
+// The import map is the page's one inline script. The Content-Security-Policy
+// allows exactly it, by hash, and no other inline script.
+const IMPORT_MAP_HASH = (() => {
+  const html = readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  const map = html.match(/<script type="importmap">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  return `sha256-${createHash('sha256').update(map).digest('base64')}`;
+})();
+
+// Routes anyone may call. Everything else needs a signed-in session.
+const PUBLIC_ROUTES = new Set([
+  'POST /api/signup', 'POST /api/login', 'POST /api/claim', 'POST /api/logout',
+  'GET /api/personalities', 'GET /api/username',
+]);
+const AUTH_ROUTES = new Set(['POST /api/signup', 'POST /api/login', 'POST /api/claim']);
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -52,7 +71,7 @@ class HttpError extends Error {
   }
 }
 
-export async function createApp({ dbFile, dataDir }) {
+export async function createApp({ dbFile, dataDir, authAttemptsPerIp = 30 }) {
   const db = await openDb(dbFile);
   const ttsDir = path.join(dataDir, 'tts');
 
@@ -261,35 +280,78 @@ export async function createApp({ dbFile, dataDir }) {
       available: !await db.get('SELECT id FROM users WHERE username = ?', [validUsername(query.get('name'))]),
     }),
 
-    'POST /api/login': async ({ body, tz }) => {
+    // New account: username, password (typed twice) and the buddy to hatch.
+    'POST /api/signup': async ({ body, tz, startSession }) => {
       const username = validUsername(body.username);
+      const problem = passwordProblem(body.password, body.confirmPassword, username);
+      if (problem) throw new HttpError(400, problem);
+      const passwordHash = await hashPassword(body.password);
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
       // Nobody picks their beast: every new player is handed a random egg.
       const species = SPECIES[Math.floor(Math.random() * SPECIES.length)];
       // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
       const preset = presetById(body.personality);
-      const token = randomBytes(24).toString('hex');
       const userId = await transaction(db, async (tx) => {
-        let user = await tx.get('SELECT id FROM users WHERE username = ?', [username]);
-        // The login screen asks for one or the other, so a typo can't hatch a
-        // second buddy and a taken name can't drop a new player into an old account.
-        if (body.mode === 'login' && !user) throw new HttpError(404, 'No buddy found for that username');
-        if (body.mode === 'signup' && user) throw new HttpError(409, 'That username already has a buddy');
-        if (!user) {
-          const { id } = await tx.run('INSERT INTO users (username, created_at) VALUES (?, ?) RETURNING id', [username, Date.now()]);
-          await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
-            [id, buddyName, species, preset ? JSON.stringify(preset) : null]);
-          user = { id };
+        if (await tx.get('SELECT id FROM users WHERE username = ?', [username])) {
+          throw new HttpError(409, 'That username is taken');
         }
-        await tx.run('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)', [token, user.id, Date.now()]);
-        return user.id;
+        const { id } = await tx.run('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?) RETURNING id',
+          [username, passwordHash, Date.now()]);
+        await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
+          [id, buddyName, species, preset ? JSON.stringify(preset) : null]);
+        return id;
       });
+      await startSession(userId);
       ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
-      return { token, ...await state(userId, tz) };
+      return state(userId, tz);
     },
 
-    'POST /api/logout': async ({ token }) => {
-      await db.run('DELETE FROM auth_tokens WHERE token = ?', [token]);
+    // One message for a wrong name and a wrong password, so neither gives
+    // away which usernames exist.
+    'POST /api/login': async ({ body, tz, startSession }) => {
+      const username = String(body.username ?? '').trim();
+      const key = username.toLowerCase();
+      if (loginFailures.isBlocked(key)) {
+        throw new HttpError(429, 'Too many wrong passwords. Wait 15 minutes and try again');
+      }
+      const user = /^[a-zA-Z0-9_]{2,20}$/.test(username)
+        && await db.get('SELECT id, password_hash FROM users WHERE username = ?', [username]);
+      const ok = user?.password_hash
+        ? await verifyPassword(body.password, user.password_hash)
+        : (await burnPasswordCheck(body.password), false);
+      if (!ok) {
+        loginFailures.hit(key);
+        throw new HttpError(401, 'Wrong username or password');
+      }
+      loginFailures.reset(key);
+      await startSession(user.id);
+      ensurePersonality(user.id).then(() => prepareLines(user.id, tz)).catch((err) => console.error('[ai]', err.message));
+      return state(user.id, tz);
+    },
+
+    // Accounts made before passwords existed: the device that still holds the
+    // old sign-in token may use it once to set a password. Nobody else can.
+    'POST /api/claim': async ({ body, tz, startSession }) => {
+      const legacy = typeof body.legacyToken === 'string' && /^[a-f0-9]{48}$/.test(body.legacyToken)
+        && await db.get(`
+          SELECT u.id, u.username FROM auth_tokens t JOIN users u ON u.id = t.user_id
+          WHERE t.token = ? AND u.password_hash IS NULL
+        `, [body.legacyToken]);
+      if (!legacy) throw new HttpError(403, 'This device can\'t set a password for that account. Please sign in');
+      const problem = passwordProblem(body.password, body.confirmPassword, legacy.username);
+      if (problem) throw new HttpError(400, problem);
+      const passwordHash = await hashPassword(body.password);
+      await transaction(db, async (tx) => {
+        await tx.run('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS NULL', [passwordHash, legacy.id]);
+        await tx.run('DELETE FROM auth_tokens WHERE user_id = ?', [legacy.id]);
+      });
+      await startSession(legacy.id);
+      return { username: legacy.username, ...await state(legacy.id, tz) };
+    },
+
+    'POST /api/logout': async ({ token, endSession }) => {
+      if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+      endSession();
       return { ok: true };
     },
 
@@ -860,26 +922,66 @@ export async function createApp({ dbFile, dataDir }) {
     }));
   }
 
+  // Brute-force limits: wrong passwords per username, and sign-in / sign-up
+  // attempts and username lookups per address.
+  const loginFailures = rateLimiter(10, 15 * 60_000);
+  const authAttempts = rateLimiter(authAttemptsPerIp, 15 * 60_000);
+  const usernameLookups = rateLimiter(120, 15 * 60_000);
+
+  // The signed-in user for this request's session cookie, or null.
+  async function sessionUser(token) {
+    if (!token) return null;
+    const session = await db.get('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+    if (!session || Number(session.expires_at) <= Date.now()) return null;
+    return session.user_id;
+  }
+
   async function handleApi(req, res, url) {
-    const route = routes[`${req.method} ${url.pathname}`];
+    const key = `${req.method} ${url.pathname}`;
+    const route = routes[key];
     if (!route) throw new HttpError(404, 'Not found');
-    const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-    let userId = null;
-    if (!['/api/login', '/api/personalities', '/api/username'].includes(url.pathname)) {
-      const auth = token && await db.get('SELECT user_id FROM auth_tokens WHERE token = ?', [token]);
-      if (!auth) throw new HttpError(401, 'Please sign in');
-      userId = auth.user_id;
+    const forged = checkSameOrigin(req);
+    if (forged) throw new HttpError(403, forged);
+    if (AUTH_ROUTES.has(key) && !authAttempts.hit(clientIp(req))) {
+      throw new HttpError(429, 'Too many attempts. Wait 15 minutes and try again');
+    }
+    if (key === 'GET /api/username' && !usernameLookups.hit(clientIp(req))) {
+      throw new HttpError(429, 'Too many lookups. Wait a few minutes and try again');
+    }
+    const token = readSessionToken(req);
+    const userId = await sessionUser(token);
+    if (!userId && !PUBLIC_ROUTES.has(key)) {
+      // A stale or expired cookie is cleared so the browser stops sending it.
+      if (token) res.setHeader('set-cookie', sessionCookie(req, ''));
+      throw new HttpError(401, 'Please sign in');
     }
     const tzHeader = Number.parseInt(req.headers['x-tz-offset'], 10);
     const tz = Number.isFinite(tzHeader) ? Math.max(-840, Math.min(840, tzHeader)) : 0;
     const body = req.method === 'GET' ? {} : await readJson(req);
-    sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams }));
+    // A fresh token on every sign-in, so a session can't be planted beforehand.
+    const startSession = async (id) => {
+      const fresh = newSessionToken();
+      const now = Date.now();
+      await db.run('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?', [id, now]);
+      await db.run('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+        [hashToken(fresh), id, now, now + SESSION_TTL_MS]);
+      if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+      res.setHeader('set-cookie', sessionCookie(req, fresh));
+    };
+    const endSession = () => res.setHeader('set-cookie', sessionCookie(req, ''));
+    sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams, startSession, endSession }));
   }
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    for (const [name, value] of Object.entries(securityHeaders(req, { importMapHash: IMPORT_MAP_HASH }))) {
+      res.setHeader(name, value);
+    }
     try {
-      if (url.pathname.startsWith('/api/tts/')) return await serveTts(res, ttsDir, url.pathname.slice(9));
+      if (url.pathname.startsWith('/api/tts/')) {
+        if (!await sessionUser(readSessionToken(req))) throw new HttpError(401, 'Please sign in');
+        return await serveTts(res, ttsDir, url.pathname.slice(9));
+      }
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       return serveStatic(req, res, url.pathname);
     } catch (err) {
@@ -932,7 +1034,7 @@ async function serveTts(res, ttsDir, name) {
   await waitForSpeech(name);
   const file = path.join(ttsDir, name);
   if (!existsSync(file)) throw new HttpError(404, 'Not found');
-  res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'public, max-age=31536000, immutable' });
+  res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'private, max-age=31536000, immutable' });
   createReadStream(file).pipe(res);
 }
 

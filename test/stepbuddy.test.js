@@ -13,6 +13,7 @@ import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, buddyLine, cleanLine, stripTags,
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
+import { hashToken } from '../server/auth.js';
 import {
   COIN_PACKAGES, COSMETICS, EGGS, ELEMENT_BEATS, MAX_ROUNDS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
   opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
@@ -256,13 +257,40 @@ let base;
 let token;
 let dbFile;
 
-async function call(method, route, body, auth = token) {
+// auth is a session token: the value of the session cookie the server set.
+async function call(method, route, body, auth = token, headers = {}) {
   const res = await fetch(base + route, {
     method,
-    headers: { 'content-type': 'application/json', ...(auth ? { authorization: `Bearer ${auth}` } : {}) },
+    headers: {
+      'content-type': 'application/json', 'x-wanderling': '1',
+      ...(auth ? { cookie: `wl_session=${auth}` } : {}), ...headers,
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return { status: res.status, data: await res.json() };
+  const data = await res.json();
+  // For the tests' convenience: the session the server just started, if any.
+  const session = /wl_session=([^;]+)/.exec(res.headers.get('set-cookie') ?? '')?.[1];
+  if (session) data.token = session;
+  return { status: res.status, data, cookie: res.headers.get('set-cookie') };
+}
+
+const PASSWORD = 'walks-4-days';
+
+// A new account with the standard test password.
+const signup = (username, extra = {}) => call('POST', '/signup',
+  { username, password: PASSWORD, confirmPassword: PASSWORD, ...extra }, null);
+
+const login = (username, password = PASSWORD) => call('POST', '/login', { username, password }, null);
+
+// Signs in as any account, even one with no password (the demo players), by
+// writing a session row directly.
+function sessionAs(userId) {
+  const db = new DatabaseSync(dbFile);
+  const session = `test-${userId}-${Math.random().toString(36).slice(2)}`;
+  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    .run(hashToken(session), userId, Date.now(), Date.now() + 60_000);
+  db.close();
+  return session;
 }
 
 // Plays a whole battle with one move, returning the final response.
@@ -279,14 +307,15 @@ async function fight(opponentId, auth = token, move = 'attack') {
 before(async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'stepbuddy-'));
   dbFile = path.join(dir, 'test.db');
-  server = await createApp({ dbFile, dataDir: dir });
+  // The tests sign in far more often than one person would.
+  server = await createApp({ dbFile, dataDir: dir, authAttemptsPerIp: 10_000 });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}/api`;
-  const login = await call('POST', '/login', { username: 'walker', buddyName: 'Nib', species: 'hamster' }, null);
+  const first = await signup('walker', { buddyName: 'Nib', species: 'hamster' });
   // The beast is a random egg, whatever the request asks for.
-  assert.ok(SPECIES.includes(login.data.buddy.species));
-  assert.equal(login.data.buddy.stage, 'egg');
-  token = login.data.token;
+  assert.ok(SPECIES.includes(first.data.buddy.species));
+  assert.equal(first.data.buddy.stage, 'egg');
+  token = first.data.token;
 });
 
 after(() => server.close());
@@ -305,30 +334,166 @@ test('three demo buddies at different stages are seeded', async () => {
 });
 
 test('signing in again returns the same account', async () => {
-  const again = await call('POST', '/login', { username: 'WALKER' }, null);
+  const again = await login('WALKER');
   assert.equal(again.data.buddy.name, 'Nib');
 
   const eggs = new Set();
-  for (let i = 0; i < 40; i++) {
-    eggs.add((await call('POST', '/login', { username: `newbie${i}`, species: 'dragon' }, null)).data.buddy.species);
+  for (let i = 0; i < 12; i++) {
+    eggs.add((await signup(`newbie${i}`, { species: 'dragon' })).data.buddy.species);
   }
   assert.ok(eggs.size > 1);
 });
 
-test('the login screen can ask to only sign in or only sign up', async () => {
-  const missing = await call('POST', '/login', { username: 'nobody_here', mode: 'login' }, null);
-  assert.equal(missing.status, 404);
-  const taken = await call('POST', '/login', { username: 'walker', mode: 'signup' }, null);
-  assert.equal(taken.status, 409);
+test('sign up needs a free username and a password typed twice', async () => {
+  assert.equal((await signup('walker')).status, 409);
 
   assert.equal((await call('GET', '/username?name=fresh', null, null)).data.available, true);
   assert.equal((await call('GET', '/username?name=Walker', null, null)).data.available, false);
   assert.equal((await call('GET', '/username?name=no%20spaces', null, null)).status, 400);
 
-  const created = await call('POST', '/login', { username: 'fresh', buddyName: 'Ash', mode: 'signup' }, null);
+  const tries = {
+    short: ['ab1', 'ab1'], noNumber: ['longenough', 'longenough'], noLetter: ['12345678', '12345678'],
+    mismatch: [PASSWORD, `${PASSWORD}x`], common: ['password123', 'password123'], same: ['fresh123', 'fresh123'],
+  };
+  for (const [password, confirmPassword] of Object.values(tries)) {
+    const res = await call('POST', '/signup', { username: 'fresh123', password, confirmPassword }, null);
+    assert.equal(res.status, 400, password);
+  }
+  assert.equal((await call('GET', '/username?name=fresh123', null, null)).data.available, true);
+
+  const created = await signup('fresh', { buddyName: 'Ash' });
   assert.equal(created.data.buddy.name, 'Ash');
-  const back = await call('POST', '/login', { username: 'fresh', mode: 'login' }, null);
+  const back = await login('fresh');
   assert.equal(back.data.buddy.name, 'Ash');
+});
+
+test('passwords are stored only as salted scrypt hashes', async () => {
+  const db = new DatabaseSync(dbFile);
+  const rows = db.prepare("SELECT password_hash FROM users WHERE username IN ('walker', 'fresh')").all();
+  db.close();
+  assert.equal(rows.length, 2);
+  for (const { password_hash: hash } of rows) {
+    assert.match(hash, /^scrypt\$\d+\$\d+\$\d+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
+    assert.ok(!hash.includes(PASSWORD));
+  }
+  // Same password, different salt, different hash.
+  assert.notEqual(rows[0].password_hash, rows[1].password_hash);
+});
+
+test('a wrong password or unknown name gets the same answer', async () => {
+  const wrong = await login('walker', 'not-the-password-1');
+  const nobody = await login('nobody_here');
+  assert.deepEqual([wrong.status, nobody.status], [401, 401]);
+  assert.equal(wrong.data.error, nobody.data.error);
+  assert.equal(wrong.data.token, undefined);
+  // Accounts without a password (the demo players) can't be signed into.
+  assert.equal((await call('POST', '/login', { username: 'mira', password: '' }, null)).status, 401);
+});
+
+test('sessions are HttpOnly, SameSite=Strict cookies that last a year', async () => {
+  const { cookie, data } = await login('walker');
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.match(cookie, /Path=\//);
+  assert.match(cookie, /Max-Age=31536000/);
+  // Only a hash of the token is stored.
+  const db = new DatabaseSync(dbFile);
+  const stored = db.prepare('SELECT token_hash, expires_at FROM sessions WHERE token_hash = ?').get(hashToken(data.token));
+  assert.equal(db.prepare('SELECT 1 FROM sessions WHERE token_hash = ?').get(data.token), undefined);
+  db.close();
+  assert.ok(Math.abs(stored.expires_at - (Date.now() + 365 * 86_400_000)) < 60_000);
+
+  // Over HTTPS (behind a proxy) the cookie is Secure and __Host- prefixed.
+  const secure = await call('POST', '/login', { username: 'walker', password: PASSWORD }, null, { 'x-forwarded-proto': 'https' });
+  assert.match(secure.cookie, /^__Host-wl_session=/);
+  assert.match(secure.cookie, /; Secure/);
+
+  // Signing out ends the session for good.
+  const out = await call('POST', '/logout', {}, data.token);
+  assert.match(out.cookie, /Max-Age=0/);
+  assert.equal((await call('GET', '/me', null, data.token)).status, 401);
+});
+
+test('an expired session is refused', async () => {
+  const { data } = await login('walker');
+  const db = new DatabaseSync(dbFile);
+  db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(Date.now() - 1, hashToken(data.token));
+  db.close();
+  assert.equal((await call('GET', '/me', null, data.token)).status, 401);
+});
+
+test('the game is closed to anyone not signed in', async () => {
+  for (const [method, route] of [
+    ['GET', '/me'], ['GET', '/config'], ['GET', '/store'], ['GET', '/opponents'], ['GET', '/stats'],
+    ['POST', '/steps/sync'], ['POST', '/battles'], ['POST', '/talk'], ['PATCH', '/me'],
+  ]) {
+    assert.equal((await call(method, route, method === 'GET' ? null : {}, null)).status, 401, `${method} ${route}`);
+    assert.equal((await call(method, route, method === 'GET' ? null : {}, 'made-up-session')).status, 401);
+  }
+  // The old Authorization: Bearer tokens no longer open anything.
+  assert.equal((await call('GET', '/me', null, null, { authorization: `Bearer ${token}` })).status, 401);
+  const tts = await fetch(`${base}/tts/${'a'.repeat(64)}.mp3`);
+  assert.equal(tts.status, 401);
+});
+
+test('requests from other sites are refused', async () => {
+  // No x-wanderling header: what a form on another site would send.
+  const res = await fetch(`${base}/buddy/upgrade`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: `wl_session=${token}` },
+    body: JSON.stringify({ type: 'attack' }),
+  });
+  assert.equal(res.status, 403);
+  const host = new URL(base).host;
+  const evil = await call('POST', '/buddy/upgrade', { type: 'attack' }, token, { origin: 'https://evil.example' });
+  assert.equal(evil.status, 403);
+  const crossSite = await call('POST', '/buddy/upgrade', { type: 'attack' }, token, { 'sec-fetch-site': 'cross-site' });
+  assert.equal(crossSite.status, 403);
+  // Login can't be forged either.
+  assert.equal((await call('POST', '/login', { username: 'walker', password: PASSWORD }, null,
+    { origin: 'https://evil.example' })).status, 403);
+  // The app's own page is fine.
+  const own = await call('GET', '/me', null, token, { origin: `http://${host}`, 'sec-fetch-site': 'same-origin' });
+  assert.equal(own.status, 200);
+});
+
+test('pages are served with security headers', async () => {
+  const res = await fetch(base.replace('/api', '/'));
+  const csp = res.headers.get('content-security-policy');
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.match(csp, /object-src 'none'/);
+  assert.match(csp, /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(res.headers.get('x-frame-options'), 'DENY');
+});
+
+test('too many wrong passwords lock that username for a while', async () => {
+  await signup('target_1');
+  for (let i = 0; i < 10; i++) assert.equal((await login('target_1', `wrong-guess-${i}`)).status, 401);
+  // Even the right password is refused now.
+  assert.equal((await login('target_1')).status, 429);
+});
+
+test('an account from before passwords can set one only from its old device', async () => {
+  const db = new DatabaseSync(dbFile);
+  const { id } = db.prepare("INSERT INTO users (username, created_at) VALUES ('oldtimer', ?) RETURNING id").get(Date.now());
+  db.prepare("INSERT INTO buddies (user_id, name) VALUES (?, 'Rusty')").run(id);
+  const legacyToken = 'ab'.repeat(24);
+  db.prepare('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)').run(legacyToken, id, Date.now());
+  db.close();
+  // No password yet, so it can't be signed into, and the old token opens nothing.
+  assert.equal((await login('oldtimer')).status, 401);
+  assert.equal((await call('GET', '/me', null, null, { authorization: `Bearer ${legacyToken}` })).status, 401);
+
+  const claim = (body) => call('POST', '/claim', body, null);
+  assert.equal((await claim({ legacyToken: 'cd'.repeat(24), password: PASSWORD, confirmPassword: PASSWORD })).status, 403);
+  assert.equal((await claim({ legacyToken, password: PASSWORD, confirmPassword: 'nope' })).status, 400);
+  const claimed = await claim({ legacyToken, password: PASSWORD, confirmPassword: PASSWORD });
+  assert.equal(claimed.status, 200);
+  assert.equal(claimed.data.buddy.name, 'Rusty');
+  // The old token is used up, and the password now works.
+  assert.equal((await claim({ legacyToken, password: PASSWORD, confirmPassword: PASSWORD })).status, 403);
+  assert.equal((await login('oldtimer')).status, 200);
 });
 
 test('steps are never counted twice', async () => {
@@ -350,7 +515,7 @@ test('steps are never counted twice', async () => {
 });
 
 test('today\'s steps start again from zero each day', async () => {
-  const login = (await call('POST', '/login', { username: 'nightowl' }, null)).data;
+  const login = (await signup('nightowl')).data;
   const today = async () => (await call('GET', '/me', null, login.token)).data.todaySteps;
   const db = new DatabaseSync(dbFile);
   try {
@@ -367,7 +532,7 @@ test('today\'s steps start again from zero each day', async () => {
 });
 
 test('a walk session belongs to one user', async () => {
-  const other = (await call('POST', '/login', { username: 'sneaky' }, null)).data.token;
+  const other = (await signup('sneaky')).data.token;
   const res = await call('POST', '/steps/sync', { sessionId: 'session-aaaa', total: 9999 }, other);
   assert.equal(res.status, 403);
 });
@@ -434,7 +599,7 @@ test('scenes: every one has artwork, and the rare ones cost diamonds only', asyn
   for (const scene of scenes) assert.match(cosmeticIcon(scene), /<rect/);
   assert.equal(scenes.filter((scene) => scene.currency === 'diamonds').length, 4);
 
-  const login = (await call('POST', '/login', { username: 'decorator' }, null)).data;
+  const login = (await signup('decorator')).data;
   const auth = login.token;
   await call('POST', '/steps/sync', { sessionId: 'session-decor', total: 20000, ended: true }, auth);
   const listed = (await call('GET', '/store', null, auth)).data.items.find((item) => item.id === 'bg-aurora');
@@ -452,7 +617,7 @@ test('scenes: every one has artwork, and the rare ones cost diamonds only', asyn
 });
 
 test('an item can only be worn by one beast at a time', async () => {
-  const login = (await call('POST', '/login', { username: 'dresser' }, null)).data;
+  const login = (await signup('dresser')).data;
   const auth = login.token;
   await call('POST', '/steps/sync', { sessionId: 'session-dress', total: 1000, ended: true }, auth);
   await call('POST', '/store/buy', { itemId: 'party-hat' }, auth);
@@ -485,9 +650,9 @@ test('eggs: rarity sets the currency, a bought egg rests until switched to', asy
     assert.ok(SPECIES.includes(egg.species));
     assert.equal(egg.currency, ['rare', 'legendary'].includes(egg.rarity) ? 'diamonds' : 'points');
   }
-  const signup = await call('POST', '/login', { username: 'breeder', buddyName: 'First' }, null);
-  const auth = signup.data.token;
-  const first = signup.data.buddy.species;
+  const joined = await signup('breeder', { buddyName: 'First' });
+  const auth = joined.data.token;
+  const first = joined.data.buddy.species;
   const store = (await call('GET', '/store', null, auth)).data;
   assert.equal(store.eggs.length, 20);
   assert.equal(store.eggs.filter((egg) => egg.owned).length, EGGS.some((egg) => egg.species === first) ? 1 : 0);
@@ -577,7 +742,7 @@ test('battles are played a move at a time, then recorded and the winner is paid'
 });
 
 test('running away, or starting another battle, loses the one in progress', async () => {
-  const runner = (await call('POST', '/login', { username: 'runner' }, null)).data.token;
+  const runner = (await signup('runner')).data.token;
   const first = (await call('POST', '/battles', { opponentId: 1 }, runner)).data.battle;
   const fled = await call('POST', '/battles/forfeit', { battleId: first.id }, runner);
   assert.deepEqual(fled.data.record, { wins: 0, losses: 1, draws: 0 });
@@ -592,7 +757,7 @@ test('running away, or starting another battle, loses the one in progress', asyn
 });
 
 test('a beast that loses a battle it started rests, longer when bigger, and only that beast', async () => {
-  const login = (await call('POST', '/login', { username: 'sleepyhead' }, null)).data;
+  const login = (await signup('sleepyhead')).data;
   const [auth, userId] = [login.token, login.user.id];
   assert.equal(login.buddy.restingUntil, null);
   const db = new DatabaseSync(dbFile);
@@ -674,16 +839,16 @@ test('players choose a personality at sign-up and can change it', async () => {
   assert.deepEqual(list.data.personalities.map((p) => p.id), PERSONALITY_PRESETS.map((p) => p.id));
   assert.equal(list.data.personalities[0].voice, undefined); // voice and style stay server-side
 
-  const login = await call('POST', '/login', { username: 'chooser', personality: 'sage' }, null);
-  const auth = login.data.token;
-  assert.equal(login.data.buddy.personality.id, 'sage');
+  const joined = await signup('chooser', { personality: 'sage' });
+  const auth = joined.data.token;
+  assert.equal(joined.data.buddy.personality.id, 'sage');
   // Returning players keep theirs.
-  await call('POST', '/login', { username: 'chooser', personality: 'diva' }, null);
+  await call('POST', '/login', { username: 'chooser', password: PASSWORD, personality: 'diva' }, null);
   assert.equal((await call('GET', '/me', null, auth)).data.buddy.personality.id, 'sage');
 
   await call('POST', '/talk', { event: 'chat' }, auth);
   const db = new DatabaseSync(dbFile);
-  const userId = login.data.user.id;
+  const userId = joined.data.user.id;
   db.prepare('INSERT INTO buddy_memory (user_id, situation, reply) VALUES (?, ?, ?)').run(userId, 'hi', 'old voice');
 
   const changed = await call('PATCH', '/me', { personality: 'coach' }, auth);
@@ -697,7 +862,7 @@ test('players choose a personality at sign-up and can change it', async () => {
 });
 
 test('a profile picture is a small jpeg, png or webp data URL and can be removed', async () => {
-  const login = (await call('POST', '/login', { username: 'poser' }, null)).data;
+  const login = (await signup('poser')).data;
   const auth = login.token;
   assert.equal(login.user.avatar, null);
   const picture = `data:image/jpeg;base64,${Buffer.from('not really a jpeg').toString('base64')}`;
@@ -715,7 +880,7 @@ test('a profile picture is a small jpeg, png or webp data URL and can be removed
 });
 
 test('a resting beast can be renamed and given a personality, but only by its owner', async () => {
-  const login = (await call('POST', '/login', { username: 'keeper' }, null)).data;
+  const login = (await signup('keeper')).data;
   const auth = login.token;
   const db = new DatabaseSync(dbFile);
   const species = SPECIES.find((id) => id !== login.buddy.species);
@@ -825,7 +990,9 @@ test('with keys, text returns before the voice and event lines are prepared ahea
     const { data } = await call('POST', '/talk', { event: 'levelup' });
     assert.match(data.text, /^Line \d+!$/);
     assert.equal(existsSync(path.join(path.dirname(dbFile), 'tts', data.audioUrl.slice(9))), false);
-    const audio = await realFetch(base.slice(0, -4) + data.audioUrl);
+    // Voice clips are only for signed-in players too.
+    assert.equal((await realFetch(base.slice(0, -4) + data.audioUrl)).status, 401);
+    const audio = await realFetch(base.slice(0, -4) + data.audioUrl, { headers: { cookie: `wl_session=${token}` } });
     assert.equal(audio.status, 200);
     assert.equal(audio.headers.get('content-type'), 'audio/mpeg');
 
@@ -913,7 +1080,7 @@ test('friends: add by username, mutual, no duplicates, removable', async () => {
   assert.equal((await call('POST', '/friends', { username: 'mira' })).status, 409);
 
   // Mira sees us as a friend too.
-  const mira = (await call('POST', '/login', { username: 'mira' }, null)).data.token;
+  const mira = sessionAs(1);
   assert.deepEqual((await call('GET', '/friends', null, mira)).data.friends.map((f) => f.username), ['walker']);
   assert.ok((await call('GET', '/opponents')).data.opponents.find((o) => o.username === 'mira').isFriend);
 
@@ -929,7 +1096,7 @@ test('friends: add by username, mutual, no duplicates, removable', async () => {
 
 test('friend requests: sent, then accepted or declined by the other player', async () => {
   const join = async (username) => {
-    const { data } = await call('POST', '/login', { username }, null);
+    const { data } = await signup(username);
     return { auth: data.token, id: data.user.id };
   };
   const [asker, picky, eager] = [await join('asker'), await join('picky'), await join('eager')];
@@ -1003,7 +1170,7 @@ test('the map key comes from the server environment', async () => {
 
 test('nearby: friends anywhere who let friends see them, nearest first', async () => {
   const park = { lat: 40.73082, lng: -73.99733 };
-  const signUp = async (username) => (await call('POST', '/login', { username, buddyName: 'Pal' }, null)).data;
+  const signUp = async (username) => (await signup(username, { buddyName: 'Pal' })).data;
   const near = await signUp('near_walker');
   const far = await signUp('far_walker');
   const stale = await signUp('stale_walker');

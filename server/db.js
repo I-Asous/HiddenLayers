@@ -36,11 +36,21 @@ function openSqlite(file) {
       map_visible INTEGER NOT NULL DEFAULT 1, -- friends see you on their map while you walk
       created_at  INTEGER NOT NULL
     );
+    -- Old username-only sign-ins. They no longer open the game; a device that
+    -- still holds one can only use it once, to set the account's password.
     CREATE TABLE IF NOT EXISTS auth_tokens (
       token      TEXT PRIMARY KEY,
       user_id    INTEGER NOT NULL REFERENCES users(id),
       created_at INTEGER NOT NULL
     );
+    -- Signed-in devices. Only the SHA-256 of each session token is stored.
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id),
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
     CREATE TABLE IF NOT EXISTS buddies (
       user_id    INTEGER PRIMARY KEY REFERENCES users(id),
       name       TEXT NOT NULL,
@@ -169,6 +179,11 @@ function openSqlite(file) {
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'map_visible')) {
     db.exec('ALTER TABLE users ADD COLUMN map_visible INTEGER NOT NULL DEFAULT 1');
   }
+  // scrypt hash of the password (see auth.js). NULL for accounts made before
+  // passwords existed and for the demo accounts: neither can be signed into.
+  if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'password_hash')) {
+    db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
+  }
   // The player's profile picture: a small image as a data: URL, or NULL for none.
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'avatar')) {
     db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
@@ -245,6 +260,13 @@ const PG_SCHEMA = `
     user_id    INTEGER NOT NULL REFERENCES users(id),
     created_at BIGINT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
   CREATE TABLE IF NOT EXISTS cosmetics (
     id    TEXT PRIMARY KEY,
     slot  TEXT NOT NULL,
@@ -361,6 +383,7 @@ const PG_SCHEMA = `
   ALTER TABLE resting_buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0);
   ALTER TABLE users ADD COLUMN IF NOT EXISTS map_visible INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 `;
 
 // Any number for pg_advisory_xact_lock; all Wanderling transactions share it.
