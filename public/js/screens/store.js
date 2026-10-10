@@ -5,6 +5,12 @@ import { app } from '../state.js';
 import { pointIcon } from './home.js';
 
 const SLOT_LABELS = { hat: 'Hats', eyewear: 'Eyewear', accessory: 'Accessories', background: 'Backgrounds' };
+const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds', wardrobe: 'Wardrobe', beasts: 'Beasts' };
+const STORE_CATS = [
+  { id: 'accessories', label: 'Accessories', slots: ['hat', 'eyewear', 'accessory'] },
+  { id: 'background',  label: 'Backgrounds', slots: ['background'] },
+  { id: 'creature',    label: 'Creatures' },
+];
 const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
   <!-- outline -->
   <path d="M3 0h2v1h1v1h1v1h1v1h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-1h1v-1h1v-1h1z" fill="#1a1c2c"/>
@@ -75,17 +81,37 @@ export function mount(el) {
 
   function storeHtml() {
     const { points } = app.state.user;
-    return `<div class="grid">${items.map((item) => `
-      <article class="item ${item.owned ? 'is-owned' : ''}">
-        <div class="item-art">${cosmeticIcon(item)}${item.owned
-          ? '<span class="stamp">Owned</span>'
-          : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
-        <b>${escapeHtml(item.name)}</b>${item.owned
-          ? '<span class="owned">In your wardrobe</span>'
-          : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
-              data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
-              ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
-      </article>`).join('')}</div>`;
+    const catPills = `
+      <div class="segmented segmented-sub" role="tablist" aria-label="Category">
+        ${STORE_CATS.map((c) =>
+          `<button role="tab" aria-selected="${storeCategory === c.id}" data-cat="${c.id}">${c.label}</button>`
+        ).join('')}
+      </div>`;
+
+    if (storeCategory === 'creature') {
+      return `${catPills}<p class="empty">🐉 Creature unlocks coming soon!</p>`;
+    }
+
+    const activeCat = STORE_CATS.find((c) => c.id === storeCategory);
+    const visible = !activeCat?.slots
+      ? items
+      : items.filter((item) => activeCat.slots.includes(item.slot));
+
+    const grid = visible.length === 0
+      ? '<p class="empty">Nothing here yet.</p>'
+      : `<div class="grid">${visible.map((item) => `
+        <article class="item ${item.owned ? 'is-owned' : ''}">
+          <div class="item-art">${cosmeticIcon(item)}${item.owned
+            ? '<span class="stamp">Owned</span>'
+            : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
+          <b>${escapeHtml(item.name)}</b>${item.owned
+            ? '<span class="owned">In your wardrobe</span>'
+            : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
+                data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
+                ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
+        </article>`).join('')}</div>`;
+
+    return `${catPills}${grid}`;
   }
 
   function wardrobeHtml() {
@@ -214,7 +240,7 @@ export function mount(el) {
     const tab = event.target.closest('[data-view]');
     if (tab) {
       view = tab.dataset.view;
-      storeCategory = 'all';
+      storeCategory = 'accessories';
       return render();
     }
     const catBtn = event.target.closest('[data-cat]');
