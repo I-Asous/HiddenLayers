@@ -14,7 +14,7 @@ import {
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  COIN_PACKAGES, EGGS, ELEMENT_BEATS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
+  COIN_PACKAGES, EGGS, ELEMENT_BEATS, MAX_ROUNDS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
   opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
@@ -117,22 +117,24 @@ test('battle: elements go water > fire > nature > sky > water', () => {
   assert.deepEqual([round.a.damage, round.a.effect, round.b.damage, round.b.effect], [18, 'strong', 9, 'weak']);
 });
 
-test('battle: ends after 5 rounds or a knockout, most HP left wins', () => {
+test('battle: runs until a knockout; only a stalemate hits the round cap', () => {
   const sides = { a: fighter(10), b: fighter(2) };
   const battle = newBattle(sides.a, sides.b);
-  let rounds = 0;
-  while (!battle.over) {
-    resolveRound(battle, sides, { a: 'attack', b: opponentMove(battle) });
-    rounds++;
-  }
-  assert.ok(rounds <= 5);
+  while (!battle.over) resolveRound(battle, sides, { a: 'attack', b: opponentMove(battle) });
   assert.equal(battle.winner, 'a');
+  assert.equal(battle.hp.b, 0);
 
-  // Everything misses: nobody is hurt and it is a draw after five rounds.
+  // Both still standing after many rounds: the fight goes on.
+  const tough = newBattle(fighter(5), fighter(5));
+  tough.hpMax = tough.hp.a = tough.hp.b = 1000;
+  for (let i = 0; i < 10; i++) resolveRound(tough, { a: fighter(5), b: fighter(5) }, { a: 'attack', b: 'attack' }, () => 0.99);
+  assert.deepEqual([tough.over, tough.round], [false, 11]);
+
+  // Everything misses: nobody is hurt and it is a draw at the cap.
   const dodgers = { a: fighter(5, 'golem', 50), b: fighter(5, 'golem', 50) };
   const quiet = newBattle(dodgers.a, dodgers.b);
-  for (let i = 0; i < 5; i++) resolveRound(quiet, dodgers, { a: 'attack', b: 'attack' }, () => 0);
-  assert.deepEqual([quiet.over, quiet.winner, quiet.round], [true, null, 5]);
+  for (let i = 0; i < MAX_ROUNDS; i++) resolveRound(quiet, dodgers, { a: 'attack', b: 'attack' }, () => 0);
+  assert.deepEqual([quiet.over, quiet.winner, quiet.round], [true, null, MAX_ROUNDS]);
 
   const knockout = newBattle(fighter(40), fighter(1));
   knockout.hp.b = 3;
@@ -472,7 +474,7 @@ test('levelling across a stage boundary evolves the buddy', async () => {
 test('battles are played a move at a time, then recorded and the winner is paid', async () => {
   const before = (await call('GET', '/me')).data;
   const start = (await call('POST', '/battles', { opponentId: 1 })).data.battle;
-  assert.deepEqual([start.round, start.rounds, start.over], [1, 5, false]);
+  assert.deepEqual([start.round, start.rounds, start.over], [1, MAX_ROUNDS, false]);
   assert.deepEqual(start.hp, { a: start.hpMax, b: start.hpMax });
   assert.equal(start.challenger.element, elementOf(before.buddy.species));
   assert.equal(start.matchup, matchup(start.challenger.element, start.opponent.element));
@@ -495,7 +497,8 @@ test('battles are played a move at a time, then recorded and the winner is paid'
     last = (await call('POST', '/battles/move', { battleId: start.id, move })).data;
     rounds++;
   }
-  assert.ok(rounds <= 5);
+  assert.ok(rounds <= MAX_ROUNDS);
+  assert.ok(last.battle.hp.a === 0 || last.battle.hp.b === 0 || rounds === MAX_ROUNDS);
   const { wins, losses, draws } = last.record;
   assert.equal(wins + losses + draws, 1);
   assert.equal(last.user.points, before.user.points + (last.battle.outcome === 'win' ? 5 : 0));

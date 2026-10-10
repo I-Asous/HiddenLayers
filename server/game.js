@@ -2,7 +2,11 @@
 
 export const STEPS_PER_POINT = 100;
 export const DEFAULT_DAILY_GOAL = 6000;
-export const BATTLE_ROUNDS = 5;
+// HP is sized so the harder hitter needs about this many clean hits to win.
+export const HP_HITS = 5;
+// Battles run until a knockout. The cap only ends a stalemate (both sides
+// guarding or dodging everything); then whoever has more HP left wins.
+export const MAX_ROUNDS = 30;
 export const BATTLE_WIN_BONUS = 5;
 export const SLOTS = ['hat', 'eyewear', 'accessory', 'background'];
 // Must match the sprites in public/js/buddy.js; the first is the default.
@@ -114,7 +118,7 @@ const EFFECT_MULTIPLIER = { strong: 1.5, weak: 0.75, even: 1 };
 // a = challenger, b = opponent. Each needs { attack, evasion, species }.
 // Both start with one shared HP size, set by the harder hitter.
 export function newBattle(a, b) {
-  const hpMax = BATTLE_ROUNDS * (Math.max(a.attack, b.attack) + 3);
+  const hpMax = HP_HITS * (Math.max(a.attack, b.attack) + 3);
   return {
     round: 1, hpMax, hp: { a: hpMax, b: hpMax }, energy: { a: 0, b: 0 }, totals: { a: 0, b: 0 }, over: false,
     winner: null,
@@ -128,7 +132,7 @@ export const canUse = (battle, side, move) =>
 //   attack  — attack + 0..3 damage, can be dodged, halved by a guard. +1 energy.
 //   guard   — deals nothing, halves an attack and stops a special. +2 energy.
 //   special — costs 2 energy, hits twice as hard and can't be dodged.
-// The battle ends after BATTLE_ROUNDS rounds or when someone runs out of HP;
+// The battle ends when someone runs out of HP. If nobody has by MAX_ROUNDS,
 // whoever has more HP left wins.
 export function resolveRound(battle, sides, moves, random = Math.random) {
   const actions = {};
@@ -156,7 +160,7 @@ export function resolveRound(battle, sides, moves, random = Math.random) {
       ? battle.energy[attacker] - SPECIAL_COST
       : Math.min(MAX_ENERGY, battle.energy[attacker] + (move === 'guard' ? 2 : 1));
   }
-  if (battle.round >= BATTLE_ROUNDS || battle.hp.a === 0 || battle.hp.b === 0) {
+  if (battle.round >= MAX_ROUNDS || battle.hp.a === 0 || battle.hp.b === 0) {
     battle.over = true;
     battle.winner = battle.hp.a === battle.hp.b ? null : battle.hp.a > battle.hp.b ? 'a' : 'b';
   } else {
