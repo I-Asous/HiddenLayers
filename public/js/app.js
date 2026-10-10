@@ -6,6 +6,7 @@ import { walk } from './steps.js';
 import * as battle from './screens/battle.js';
 import * as home from './screens/home.js';
 import * as map from './screens/map.js';
+import { personalityOptions } from './screens/profile.js';
 import * as stats from './screens/stats.js';
 import * as store from './screens/store.js';
 import * as walkScreen from './screens/walk.js';
@@ -54,10 +55,18 @@ function showLogin() {
         <label>Name your buddy <small>(new players)</small>
           <input name="buddyName" maxlength="16" autocomplete="off" placeholder="Buddy">
         </label>
+        <label>Personality <small>(new players)</small>
+          <select name="personality">
+            <option value="" selected>Surprise me</option>
+          </select>
+        </label>
         <button class="btn btn-primary btn-block btn-xl">Start</button>
         <p class="hint">No password needed. Returning? Just enter your username.</p>
       </form>
     </main>`;
+  api('/personalities').then(({ personalities }) => {
+    root.querySelector('[name=personality]')?.insertAdjacentHTML('beforeend', personalityOptions(personalities));
+  }).catch(() => {});
   root.querySelector('#login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
@@ -70,6 +79,7 @@ function showLogin() {
           username: form.get('username').trim(),
           buddyName: form.get('buddyName'),
           species: form.get('species'),
+          personality: form.get('personality'),
         },
       });
       setToken(result.token);

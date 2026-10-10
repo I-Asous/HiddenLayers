@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { GpsFilter, distanceM, bearingDeg, pathLengthM, pointAlong, stepsFromMeters } from '../public/js/geo.js';
 import { StepDetector } from '../public/js/steps.js';
 import {
-  BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, cleanLine, stripTags,
+  BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, buddyLine, cleanLine, stripTags,
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
@@ -314,10 +314,60 @@ test('a buddy gets one personality and keeps it', async () => {
   assert.deepEqual((await call('GET', '/me')).data.buddy.personality, first);
 });
 
+test('players choose a personality at sign-up and can change it', async () => {
+  const list = await call('GET', '/personalities', null, null);
+  assert.deepEqual(list.data.personalities.map((p) => p.id), PERSONALITY_PRESETS.map((p) => p.id));
+  assert.equal(list.data.personalities[0].voice, undefined); // voice and style stay server-side
+
+  const login = await call('POST', '/login', { username: 'chooser', personality: 'sage' }, null);
+  const auth = login.data.token;
+  assert.equal(login.data.buddy.personality.id, 'sage');
+  // Returning players keep theirs.
+  await call('POST', '/login', { username: 'chooser', personality: 'diva' }, null);
+  assert.equal((await call('GET', '/me', null, auth)).data.buddy.personality.id, 'sage');
+
+  await call('POST', '/talk', { event: 'chat' }, auth);
+  const db = new DatabaseSync(dbFile);
+  const userId = login.data.user.id;
+  db.prepare('INSERT INTO buddy_memory (user_id, situation, reply) VALUES (?, ?, ?)').run(userId, 'hi', 'old voice');
+
+  const changed = await call('PATCH', '/me', { personality: 'coach' }, auth);
+  assert.equal(changed.data.buddy.personality.id, 'coach');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM buddy_memory WHERE user_id = ?').get(userId).n, 0);
+
+  const surprise = await call('PATCH', '/me', { personality: 'surprise' }, auth);
+  assert.equal(surprise.data.buddy.personality.traits.length, 3);
+  assert.equal((await call('PATCH', '/me', { personality: 'nope' }, auth)).status, 400);
+  db.close();
+});
+
 test('buddy lines lose emojis and action text but keep audio tags for speech', () => {
   const speech = cleanLine('*giggles* Hi there! 😄 [laughs] Let\'s go 🚶‍♀️ [whisp');
   assert.equal(speech, 'Hi there! [laughs] Let\'s go');
   assert.equal(stripTags(speech), 'Hi there! Let\'s go');
+});
+
+test('a military buddy never giggles, even in a happy mood', async () => {
+  const realFetch = globalThis.fetch;
+  const savedEnv = { ...process.env };
+  let system;
+  globalThis.fetch = async (_url, opts) => {
+    system =JSON.parse(opts.body).system_instruction.parts[0].text;
+    return Response.json({ candidates: [{ content: { parts: [{ text: '[GIGGLES] Eyes front, [excited] recruit!' }] } }] });
+  };
+  Object.assign(process.env, { GEMINI_API_KEY: 'test' });
+  try {
+    const sergeant = PERSONALITY_PRESETS.find((p) => p.id === 'sergeant');
+    const buddy = { name: 'Sarge', species: 'dragon', stage: 'adult', personality: sergeant };
+    const week = [{ date: 'today', steps: 9000 }];
+    const line = await buddyLine({ event: 'chat', buddy, week, goal: 6000, mood: 'happy' });
+    assert.equal(line.speech, 'Eyes front, [excited] recruit!');
+    assert.match(system, /Never use \[giggles\]/);
+    assert.doesNotMatch(system, /e\.g\.[^.]*\[giggles\]/);
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env = savedEnv;
+  }
 });
 
 test('every preset voice exists and every voice has a preset', () => {

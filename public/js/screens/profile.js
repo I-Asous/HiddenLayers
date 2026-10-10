@@ -5,6 +5,10 @@ import { walk } from '../steps.js';
 
 const OUTCOME = { win: 'Won', loss: 'Lost', draw: 'Draw' };
 
+// <option>s for a personality <select>: the presets from GET /api/personalities.
+export const personalityOptions = (presets) => presets.map((p) => `
+  <option value="${p.id}">${escapeHtml(`${p.name}: ${p.traits.join(', ')}`)}</option>`).join('');
+
 export async function openProfile() {
   const { user, buddy, record } = app.state;
   const overlay = document.createElement('div');
@@ -31,6 +35,12 @@ export async function openProfile() {
           <input name="dailyGoal" type="number" inputmode="numeric" min="500" max="50000" step="100" required
             value="${user.dailyGoal}">
         </label>
+        <label>Personality
+          <select name="personality">
+            <option value="" selected>Keep current</option>
+            <option value="surprise">Surprise me (new random one)</option>
+          </select>
+        </label>
         <button class="btn btn-primary btn-block">Save</button>
       </form>
       <h3>Recent battles</h3>
@@ -44,18 +54,29 @@ export async function openProfile() {
     if (event.target === overlay || event.target.closest('[data-close]')) close();
   });
 
+  api('/personalities').then(({ personalities }) => {
+    overlay.querySelector('[name=personality]')
+      .insertAdjacentHTML('beforeend', personalityOptions(personalities));
+  }).catch(() => {});
+
   overlay.querySelector('#profile-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
+    const button = event.target.querySelector('button');
+    button.disabled = true; // a new personality can take a moment to invent
     try {
       app.setState(await api('/me', {
         method: 'PATCH',
-        body: { buddyName: form.get('buddyName'), dailyGoal: Number(form.get('dailyGoal')) },
+        body: {
+          buddyName: form.get('buddyName'), dailyGoal: Number(form.get('dailyGoal')),
+          personality: form.get('personality') || undefined,
+        },
       }));
       toast('Saved!', 'good');
       close();
     } catch (err) {
       toast(err.message, 'warn');
+      button.disabled = false;
     }
   });
 
