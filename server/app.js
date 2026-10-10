@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -8,7 +8,12 @@ import {
   waitForSpeech,
 } from './ai.js';
 import { createAdminRoutes } from './admin.js';
-import { DAY_MS, dayLabel, isDemoUser, localDay, openDb, stepsByDay, transaction } from './db.js';
+import {
+  SESSION_TTL_MS, burnPasswordCheck, checkSameOrigin, clientIp, hashPassword, hashToken, newSessionToken, passwordProblem,
+  rateLimiter, readSessionToken, securityHeaders, sessionCookie, verifyPassword,
+} from './auth.js';
+import { DAY_MS, DEMO_USERNAMES, dayLabel, isDemoUser, localDay, openDb, stepsByDay, transaction } from './db.js';
+import { distanceM } from '../public/js/geo.js';
 import {
   COIN_PACKAGES, COSMETICS, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse,
   cosmeticCurrency, elementOf, matchup,
@@ -32,6 +37,11 @@ const MIME = {
   '.glb': 'model/gltf-binary',
 };
 const MAX_SESSION_STEPS = 200_000;
+// Friends show up on each other's maps, wherever they are, while their
+// position is this fresh.
+const NEARBY_FRESH_MS = 120_000;
+// Demo: where the seeded buddies stand around you, in metres [north, east].
+const DEMO_OFFSETS_M = [[60, 40], [-90, 70], [30, -120]];
 
 // Everything that makes a beast itself, and so moves with it when the player
 // switches which one they walk with.
@@ -40,6 +50,21 @@ const BUDDY_COLUMNS = [
   'personality', 'rest_until',
 ];
 
+// The import map is the page's one inline script. The Content-Security-Policy
+// allows exactly it, by hash, and no other inline script.
+const IMPORT_MAP_HASH = (() => {
+  const html = readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  const map = html.match(/<script type="importmap">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  return `sha256-${createHash('sha256').update(map).digest('base64')}`;
+})();
+
+// Routes anyone may call. Everything else needs a signed-in session.
+const PUBLIC_ROUTES = new Set([
+  'POST /api/signup', 'POST /api/login', 'POST /api/claim', 'POST /api/logout',
+  'GET /api/personalities', 'GET /api/username',
+]);
+const AUTH_ROUTES = new Set(['POST /api/signup', 'POST /api/login', 'POST /api/claim']);
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -47,7 +72,7 @@ class HttpError extends Error {
   }
 }
 
-export async function createApp({ dbFile, dataDir }) {
+export async function createApp({ dbFile, dataDir, authAttemptsPerIp = 30 }) {
   const db = await openDb(dbFile);
   // Prices, the battle bonus and rest times: defaults unless an admin changed them.
   const rules = await loadRules(db);
@@ -179,7 +204,7 @@ export async function createApp({ dbFile, dataDir }) {
     return {
       user: {
         id: user.id, username: user.username, points: user.points, coins: user.coins,
-        totalSteps: user.total_steps, dailyGoal: user.daily_goal,
+        totalSteps: user.total_steps, dailyGoal: user.daily_goal, mapVisible: Boolean(user.map_visible),
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
@@ -270,37 +295,82 @@ export async function createApp({ dbFile, dataDir }) {
       available: !await db.get('SELECT id FROM users WHERE username = ?', [validUsername(query.get('name'))]),
     }),
 
-    'POST /api/login': async ({ body, tz }) => {
+    // New account: username, password (typed twice) and the buddy to hatch.
+    'POST /api/signup': async ({ body, tz, startSession }) => {
       const username = validUsername(body.username);
+      const problem = passwordProblem(body.password, body.confirmPassword, username);
+      if (problem) throw new HttpError(400, problem);
+      const passwordHash = await hashPassword(body.password);
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
       // Nobody picks their beast: every new player is handed a random egg.
       const species = SPECIES[Math.floor(Math.random() * SPECIES.length)];
       // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
       const preset = presetById(body.personality);
-      const token = randomBytes(24).toString('hex');
       const userId = await transaction(db, async (tx) => {
-        let user = await tx.get('SELECT id, banned_at FROM users WHERE username = ?', [username]);
-        if (user && user.banned_at !== null) throw new HttpError(403, 'This account is suspended');
-        // The login screen asks for one or the other, so a typo can't hatch a
-        // second buddy and a taken name can't drop a new player into an old account.
-        if (body.mode === 'login' && !user) throw new HttpError(404, 'No buddy found for that username');
-        if (body.mode === 'signup' && user) throw new HttpError(409, 'That username already has a buddy');
-        if (!user) {
-          const { id } = await tx.run('INSERT INTO users (username, created_at) VALUES (?, ?) RETURNING id', [username, Date.now()]);
-          await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
-            [id, buddyName, species, preset ? JSON.stringify(preset) : null]);
-          user = { id };
+        if (await tx.get('SELECT id FROM users WHERE username = ?', [username])) {
+          throw new HttpError(409, 'That username is taken');
         }
-        await tx.run('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)', [token, user.id, Date.now()]);
-        return user.id;
+        const { id } = await tx.run('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?) RETURNING id',
+          [username, passwordHash, Date.now()]);
+        await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
+          [id, buddyName, species, preset ? JSON.stringify(preset) : null]);
+        return id;
       });
       markSeen(userId);
+      await startSession(userId);
       ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
-      return { token, ...await state(userId, tz) };
+      return state(userId, tz);
     },
 
-    'POST /api/logout': async ({ token }) => {
-      await db.run('DELETE FROM auth_tokens WHERE token = ?', [token]);
+    // One message for a wrong name and a wrong password, so neither gives
+    // away which usernames exist.
+    'POST /api/login': async ({ body, tz, startSession }) => {
+      const username = String(body.username ?? '').trim();
+      const key = username.toLowerCase();
+      if (loginFailures.isBlocked(key)) {
+        throw new HttpError(429, 'Too many wrong passwords. Wait 15 minutes and try again');
+      }
+      const user = /^[a-zA-Z0-9_]{2,20}$/.test(username)
+        && await db.get('SELECT id, password_hash, banned_at FROM users WHERE username = ?', [username]);
+      const ok = user?.password_hash
+        ? await verifyPassword(body.password, user.password_hash)
+        : (await burnPasswordCheck(body.password), false);
+      if (!ok) {
+        loginFailures.hit(key);
+        throw new HttpError(401, 'Wrong username or password');
+      }
+      loginFailures.reset(key);
+      // Only said to someone who knows the password, so it gives nothing away.
+      if (user.banned_at !== null) throw new HttpError(403, 'This account is suspended');
+      markSeen(user.id);
+      await startSession(user.id);
+      ensurePersonality(user.id).then(() => prepareLines(user.id, tz)).catch((err) => console.error('[ai]', err.message));
+      return state(user.id, tz);
+    },
+
+    // Accounts made before passwords existed: the device that still holds the
+    // old sign-in token may use it once to set a password. Nobody else can.
+    'POST /api/claim': async ({ body, tz, startSession }) => {
+      const legacy = typeof body.legacyToken === 'string' && /^[a-f0-9]{48}$/.test(body.legacyToken)
+        && await db.get(`
+          SELECT u.id, u.username FROM auth_tokens t JOIN users u ON u.id = t.user_id
+          WHERE t.token = ? AND u.password_hash IS NULL
+        `, [body.legacyToken]);
+      if (!legacy) throw new HttpError(403, 'This device can\'t set a password for that account. Please sign in');
+      const problem = passwordProblem(body.password, body.confirmPassword, legacy.username);
+      if (problem) throw new HttpError(400, problem);
+      const passwordHash = await hashPassword(body.password);
+      await transaction(db, async (tx) => {
+        await tx.run('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS NULL', [passwordHash, legacy.id]);
+        await tx.run('DELETE FROM auth_tokens WHERE user_id = ?', [legacy.id]);
+      });
+      await startSession(legacy.id);
+      return { username: legacy.username, ...await state(legacy.id, tz) };
+    },
+
+    'POST /api/logout': async ({ token, endSession }) => {
+      if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+      endSession();
       return { ok: true };
     },
 
@@ -341,6 +411,12 @@ export async function createApp({ dbFile, dataDir }) {
         const name = String(body.buddyName).trim().slice(0, 16);
         if (!name) throw new HttpError(400, 'Your buddy needs a name');
         await db.run(`UPDATE ${table} SET name = ? WHERE ${where}`, [name, key]);
+      }
+      if (body.mapVisible !== undefined) {
+        if (typeof body.mapVisible !== 'boolean') throw new HttpError(400, 'mapVisible must be true or false');
+        await db.run('UPDATE users SET map_visible = ? WHERE id = ?', [body.mapVisible ? 1 : 0, userId]);
+        // Hiding takes you off friends' maps now, not when your last position goes stale.
+        if (!body.mapVisible) await db.run('DELETE FROM locations WHERE user_id = ?', [userId]);
       }
       // A preset id, or 'surprise' for a fresh invented one.
       if (body.personality !== undefined) {
@@ -520,6 +596,74 @@ export async function createApp({ dbFile, dataDir }) {
         friendStatus: row.is_friend ? 'friend' : row.is_incoming ? 'incoming' : row.is_requested ? 'requested' : null,
       })),
     }),
+
+    'POST /api/location':async ({ userId, body }) => {
+      const lat = Number(body.lat);
+      const lng = Number(body.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        throw new HttpError(400, 'Invalid location');
+      }
+      await db.run(`
+        INSERT INTO locations (user_id, lat, lng, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at
+      `, [userId, lat, lng, Date.now()]);
+      return { ok: true };
+    },
+
+    // Friends who let friends see them and have shared a position lately,
+    // nearest first. Only for callers sharing their own position.
+    'GET /api/nearby': async ({ userId, query }) => {
+      const since = Date.now() - NEARBY_FRESH_MS;
+      const me = await db.get('SELECT lat, lng FROM locations WHERE user_id = ? AND updated_at >= ?', [userId, since]);
+      if (!me) return { players: [] };
+      const toPlayer = (row, at) => ({
+        userId: row.user_id, username: row.username, lat: at.lat, lng: at.lng,
+        distanceM: Math.round(distanceM(me, at)), buddy: publicBuddy(row),
+      });
+      const players = (await db.all(`
+        SELECT b.*, u.username, l.lat, l.lng
+        FROM locations l JOIN users u ON u.id = l.user_id JOIN buddies b ON b.user_id = u.id
+        JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+        WHERE u.map_visible = 1 AND l.updated_at >= ?
+      `, [userId, since]))
+        .map((row) => toPlayer(row, row));
+      if (query.get('demo') === '1') {
+        const metresPerDegree = 111_320;
+        for (const [i, username] of DEMO_USERNAMES.entries()) {
+          const row = await db.get(`
+            SELECT b.*, u.username FROM users u JOIN buddies b ON b.user_id = u.id
+            JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+            WHERE u.username = ?
+          `, [userId, username]);
+          if (!row || players.some((p) => p.userId === row.user_id)) continue;
+          const [north, east] = DEMO_OFFSETS_M[i % DEMO_OFFSETS_M.length];
+          players.push({
+            ...toPlayer(row, {
+              lat: me.lat + north / metresPerDegree,
+              lng: me.lng + east / (metresPerDegree * Math.cos((me.lat * Math.PI) / 180)),
+            }),
+            demo: true, // the map walks it around this spot
+          });
+        }
+      }
+      players.sort((a, b) => a.distanceM - b.distanceM);
+      return { players: players.slice(0, 30) };
+    },
+
+    'GET /api/player': async ({ userId, query }) => {
+      const id = Number(query.get('id'));
+      const row = Number.isInteger(id) && await db.get(`
+        SELECT b.*, u.username, u.total_steps, f.friend_id IS NOT NULL AS is_friend
+        FROM users u JOIN buddies b ON b.user_id = u.id
+        LEFT JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+        WHERE u.id = ?
+      `, [userId, id]);
+      if (!row) throw new HttpError(404, 'That buddy has wandered off');
+      return {
+        userId: row.user_id, username: row.username, buddy: publicBuddy(row), record: await record(id),
+        totalSteps: row.total_steps, isFriend: Boolean(row.is_friend),
+      };
+    },
 
     'GET /api/friends': async ({ userId }) => friendsView(userId),
 
@@ -789,9 +933,6 @@ export async function createApp({ dbFile, dataDir }) {
     }));
   }
 
-  // The dashboard's API (see admin.js). Players have no passwords, so admin
-  // rights can't hang off an account: every call must carry the ADMIN_KEY from
-  // the server's environment. With no key set, the admin API doesn't exist.
   // When each player's app last called in. Kept in memory for the dashboard's
   // "online now", and written to the database at most once a minute per
   // player so "last seen" survives a restart without a write on every request.
@@ -806,6 +947,9 @@ export async function createApp({ dbFile, dataDir }) {
     }
   }
 
+  // The dashboard's API (see admin.js). Admin rights don't hang off a player
+  // account: every call must carry the ADMIN_KEY from the server's environment.
+  // With no key set, the admin API doesn't exist.
   const adminRoutes = createAdminRoutes({
     db, rules, HttpError, validUsername,
     seenAt: (userId) => lastSeen.get(userId)?.at ?? null,
@@ -833,29 +977,69 @@ export async function createApp({ dbFile, dataDir }) {
     sendJson(res, 200, await route({ body, query: url.searchParams, tz: timezoneOf(req) }));
   }
 
+  // Brute-force limits: wrong passwords per username, and sign-in / sign-up
+  // attempts and username lookups per address.
+  const loginFailures = rateLimiter(10, 15 * 60_000);
+  const authAttempts = rateLimiter(authAttemptsPerIp, 15 * 60_000);
+  const usernameLookups = rateLimiter(120, 15 * 60_000);
+
+  // The signed-in user for this request's session cookie, or null.
+  async function sessionUser(token) {
+    if (!token) return null;
+    const session = await db.get(`
+      SELECT s.user_id, s.expires_at, u.banned_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?
+    `, [hashToken(token)]);
+    // A suspended player's sessions are removed, so the banned check is only a backstop.
+    if (!session || Number(session.expires_at) <= Date.now() || session.banned_at !== null) return null;
+    return session.user_id;
+  }
+
   async function handleApi(req, res, url) {
-    const route = routes[`${req.method} ${url.pathname}`];
+    const key = `${req.method} ${url.pathname}`;
+    const route = routes[key];
     if (!route) throw new HttpError(404, 'Not found');
-    const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-    let userId = null;
-    if (!['/api/login', '/api/personalities', '/api/username'].includes(url.pathname)) {
-      const auth = token && await db.get(`
-        SELECT t.user_id, u.banned_at FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?
-      `, [token]);
-      // A suspended player's sessions are removed, so this is only a backstop.
-      if (!auth || auth.banned_at !== null) throw new HttpError(401, 'Please sign in');
-      userId = auth.user_id;
-      markSeen(userId);
+    const forged = checkSameOrigin(req);
+    if (forged) throw new HttpError(403, forged);
+    if (AUTH_ROUTES.has(key) && !authAttempts.hit(clientIp(req))) {
+      throw new HttpError(429, 'Too many attempts. Wait 15 minutes and try again');
+    }
+    if (key === 'GET /api/username' && !usernameLookups.hit(clientIp(req))) {
+      throw new HttpError(429, 'Too many lookups. Wait a few minutes and try again');
+    }
+    const token = readSessionToken(req);
+    const userId = await sessionUser(token);
+    if (userId) markSeen(userId);
+    if (!userId && !PUBLIC_ROUTES.has(key)) {
+      // A stale or expired cookie is cleared so the browser stops sending it.
+      if (token) res.setHeader('set-cookie', sessionCookie(req, ''));
+      throw new HttpError(401, 'Please sign in');
     }
     const tz = timezoneOf(req);
     const body = req.method === 'GET' ? {} : await readJson(req);
-    sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams }));
+    // A fresh token on every sign-in, so a session can't be planted beforehand.
+    const startSession = async (id) => {
+      const fresh = newSessionToken();
+      const now = Date.now();
+      await db.run('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?', [id, now]);
+      await db.run('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+        [hashToken(fresh), id, now, now + SESSION_TTL_MS]);
+      if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+      res.setHeader('set-cookie', sessionCookie(req, fresh));
+    };
+    const endSession = () => res.setHeader('set-cookie', sessionCookie(req, ''));
+    sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams, startSession, endSession }));
   }
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    for (const [name, value] of Object.entries(securityHeaders(req, { importMapHash: IMPORT_MAP_HASH }))) {
+      res.setHeader(name, value);
+    }
     try {
-      if (url.pathname.startsWith('/api/tts/')) return await serveTts(res, ttsDir, url.pathname.slice(9));
+      if (url.pathname.startsWith('/api/tts/')) {
+        if (!await sessionUser(readSessionToken(req))) throw new HttpError(401, 'Please sign in');
+        return await serveTts(res, ttsDir, url.pathname.slice(9));
+      }
       if (url.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res, url);
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       if (url.pathname === '/admin') {
@@ -920,7 +1104,7 @@ async function serveTts(res, ttsDir, name) {
   await waitForSpeech(name);
   const file = path.join(ttsDir, name);
   if (!existsSync(file)) throw new HttpError(404, 'Not found');
-  res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'public, max-age=31536000, immutable' });
+  res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'private, max-age=31536000, immutable' });
   createReadStream(file).pipe(res);
 }
 

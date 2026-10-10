@@ -5,7 +5,8 @@
 // (Ready Player Me, Mixamo and 3ds Max "Biped" skeletons) get clips generated
 // here by swinging their arm and leg bones.
 
-const HEIGHT = 1.7;
+/** Every character is scaled to stand this tall, before any stage scaling. */
+export const HEIGHT = 1.7;
 const WALK_PERIOD_S = 1;
 const IDLE_PERIOD_S = 3;
 const SAMPLES = 16;

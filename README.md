@@ -1,10 +1,12 @@
-# StepBuddy
+# Wanderling
+
+Link to demo: https://hiddenlayers-production.up.railway.app/
 
 A virtual pet that grows the more you walk.
 
 You hatch a mythical buddy (a **dragon**, **phoenix** or **kraken**) and raise it with real steps. Walking earns Stride Points. Spend them to level your buddy up, sharpen its attack and evasion, and dress it in cosmetics. Then take it into battle against your friends. Your buddy has an AI-generated personality and talks back with its own voice. It gets proud when you keep a streak going and sulks when you lose two fights in a row.
 
-StepBuddy is a mobile-first web app (installable as a PWA) with a small Node server behind it.
+Wanderling is a mobile-first web app (installable as a PWA) with a small Node server behind it.
 
 ## How it plays
 
@@ -66,6 +68,8 @@ Every key is optional. Each one you leave out swaps in a fallback, so the app st
 | `DEMO_MODE` | Set to `1` to allow the demo shortcuts (instant steps, simulated walk) for anyone who opens the app with `?demo=1` | Shortcuts off |
 | `ADMIN_KEY` | Turns on the admin dashboard at `/admin/` and is the key that opens it | Dashboard off |
 
+| `APP_ORIGIN` | The site's public address, e.g. `https://wanderling.up.railway.app`. Only needed if a proxy rewrites the `Host` header and every action starts failing with "Cross-site request" | Taken from the request |
+
 If `TIGER_DATABASE_URL` is set but unreachable at startup (for example, the service is paused), the server logs it and falls back to SQLite.
 
 ## Admin dashboard
@@ -80,14 +84,27 @@ Open `/admin/` on the server and enter the `ADMIN_KEY` from `.env`. It has six t
 - **Announce**: send a message to every player. It pops up once in their app; it can run for a set time or until stopped.
 - **Log**: every action taken from the dashboard.
 
-Players sign in with a username and no password, so the key is the only thing guarding the dashboard: keep it secret, use a long random one, and serve the app over HTTPS anywhere but your own machine.
+The key is separate from player accounts and is the only thing guarding the dashboard: keep it secret, use a long random one, and serve the app over HTTPS anywhere but your own machine.
+
+## Accounts and security
+
+- **Passwords** must be 8–128 characters with a letter and a number, can't be the username or a very common password, and are typed twice at sign-up. They're stored only as salted scrypt hashes.
+- **Sessions** are random tokens in an `HttpOnly`, `SameSite=Strict` cookie that lasts a year. Over HTTPS the cookie is also `Secure` and named with the `__Host-` prefix. The database stores only a SHA-256 hash of each token, so a database leak can't be used to sign in.
+- **Every API call needs a valid session**, except sign-up, login, the username check and the personality list. Voice clips need one too.
+- **Forged requests are refused.** Anything that changes data must carry the `x-wanderling` header and come from the site's own origin.
+- **Brute force is limited.** After 10 wrong passwords a username is locked for 15 minutes, and each address gets 30 sign-in or sign-up attempts per 15 minutes.
+- **Response headers:** a Content Security Policy, plus anti-framing, `nosniff` and HSTS over HTTPS.
+- **Accounts from before passwords** have no password, so nobody can sign into them. The device that still holds such an account's old sign-in can use it once to set a password. Demo players (`mira`, `theo`, `ana`) can't be signed into.
+
+The code lives in `server/auth.js`.
 
 ## Project layout
 
 ```
 server/
   index.js      entry point: loads .env, opens the DB, starts the HTTP server
-  app.js        routes (/api/...), static files, auth
+  app.js        routes (/api/...), static files, session checks
+  auth.js       password hashing, session cookies, forged-request checks, rate limits, security headers
   game.js       pure game rules: points, levels, moods, battles, store items
   db.js         one interface over Tiger Data (Postgres) or SQLite, plus seeding
   ai.js         Gemini personalities/lines and ElevenLabs voice

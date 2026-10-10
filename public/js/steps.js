@@ -107,7 +107,7 @@ class Walk extends EventTarget {
   async start({ motion = true } = {}) {
     if (this.walking) return;
     if (motion) {
-      if (!this.supported) throw new Error('This browser has no motion sensor. Open StepBuddy on your phone.');
+      if (!this.supported) throw new Error('This browser has no motion sensor. Open Wanderling on your phone.');
       if (this.needsPermission) {
         const answer = await DeviceMotionEvent.requestPermission();
         if (answer !== 'granted') {

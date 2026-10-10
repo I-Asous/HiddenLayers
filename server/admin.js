@@ -25,11 +25,12 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
     [action, user?.id ?? null, user?.username ?? null, detail, Date.now()],
   );
 
-  // Some databases carry a locations table (the map's shared positions) that
-  // this code doesn't create but that points at players; a deleted player's
-  // row there has to go too. Checked once, outside any transaction.
-  let hasLocations;
-  const locationsExist = () => (hasLocations ??= db.get('SELECT 1 AS yes FROM locations LIMIT 1').then(() => true, () => false));
+  // Signed-in devices: sessions, plus any sign-in left from before passwords existed.
+  const endSessions = async (tx, userId) => {
+    const { changes } = await tx.run('DELETE FROM sessions WHERE user_id = ?', [userId]);
+    await tx.run('DELETE FROM auth_tokens WHERE user_id = ?', [userId]);
+    return changes;
+  };
 
   async function playerOr404(userId, q = db) {
     const user = Number.isInteger(userId) && await q.get('SELECT * FROM users WHERE id = ?', [userId]);
@@ -137,7 +138,7 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
         id, username: user.username, demo: isDemoUser(user.username), suspended: user.banned_at !== null,
         joined: Number(user.created_at), points: user.points, diamonds: user.coins,
         totalSteps: Number(user.total_steps), dailyGoal: user.daily_goal,
-        sessions: (await db.get('SELECT COUNT(*) AS n FROM auth_tokens WHERE user_id = ?', [id])).n,
+        sessions: (await db.get('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?', [id, Date.now()])).n,
         beasts: [beastView(active, true), ...resting.map((b) => beastView(b, false))],
         items: (await db.all(`
           SELECT c.id, c.name, c.slot, o.bought_at FROM owned_cosmetics o JOIN cosmetics c ON c.id = o.cosmetic_id
@@ -302,7 +303,7 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
         const user = await playerOr404(body.userId, tx);
         if (isDemoUser(user.username)) throw new HttpError(409, 'Demo accounts can\'t be suspended');
         await tx.run('UPDATE users SET banned_at = ? WHERE id = ?', [suspended ? Date.now() : null, user.id]);
-        if (suspended) await tx.run('DELETE FROM auth_tokens WHERE user_id = ?', [user.id]);
+        if (suspended) await endSessions(tx, user.id);
         await log(tx, suspended ? 'suspend' : 'unsuspend', user);
       });
       if (suspended) forgetPlayer(body.userId);
@@ -313,7 +314,7 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
     'POST /api/admin/signout': async ({ body }) => {
       const sessions = await transaction(db, async (tx) => {
         const user = await playerOr404(body.userId, tx);
-        const { changes } = await tx.run('DELETE FROM auth_tokens WHERE user_id = ?', [user.id]);
+        const changes = await endSessions(tx, user.id);
         await log(tx, 'signout', user, `ended ${changes} sessions`);
         return changes;
       });
@@ -322,7 +323,6 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
 
     // Removes the player and everything of theirs. confirm must be their username, so a slip can't do it.
     'POST /api/admin/delete': async ({ body }) => {
-      const extra = await locationsExist() ? [['locations', ['user_id']]] : [];
       await transaction(db, async (tx) => {
         const user = await playerOr404(body.userId, tx);
         if (isDemoUser(user.username)) throw new HttpError(409, 'Demo accounts can\'t be deleted');
@@ -331,7 +331,7 @@ export function createAdminRoutes({ db, rules, HttpError, validUsername, forgetP
         }
         const id = user.id;
         for (const [table, columns] of [
-          ...extra, ['auth_tokens', ['user_id']], ['ready_lines', ['user_id']], ['buddy_memory', ['user_id']],
+          ['sessions', ['user_id']], ['auth_tokens', ['user_id']], ['locations', ['user_id']], ['ready_lines', ['user_id']], ['buddy_memory', ['user_id']],
           ['friend_requests', ['from_id', 'to_id']], ['friendships', ['user_id', 'friend_id']],
           ['battles', ['challenger_id', 'opponent_id', 'winner_id']], ['step_events', ['user_id']], ['walk_sessions', ['user_id']],
           ['owned_cosmetics', ['user_id']], ['resting_buddies', ['user_id']], ['buddies', ['user_id']],

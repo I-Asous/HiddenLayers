@@ -223,7 +223,7 @@ function exportCsv() {
   ].map(safe).join(','));
   const link = document.createElement('a');
   link.href = URL.createObjectURL(new Blob([`${header.join(',')}\n${lines.join('\n')}\n`], { type: 'text/csv' }));
-  link.download = `stepbuddy-players-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.download = `wanderling-players-${new Date().toISOString().slice(0, 10)}.csv`;
   link.click();
   URL.revokeObjectURL(link.href);
 }

@@ -2,19 +2,22 @@
 // the player is. There are two looks, because Google only allows one or the other:
 //
 // - Retro (default): the flat map, recoloured from code to the app's palette
-//   The character is rendered by three.js on its
-//   own canvas, pinned to the middle of the screen (the camera follows it).
+//   The characters are rendered by three.js on its own canvas over the map,
+//   each standing where its map position lands (the camera follows the buddy).
 // - 3D (when GOOGLE_MAPS_MAP_ID is set): the tilted vector map with 3D
-//   buildings. three.js draws the character into the map's own WebGL scene
+//   buildings. three.js draws the characters into the map's own WebGL scene
 //   through a WebGLOverlayView. Colours then come from the Map ID's cloud style.
+// Nearby players appear as their own buddies; tap one to see them and battle.
 import { api } from '../api.js';
-import { SPECIES, buddySvg } from '../buddy.js';
+import { SPECIES, buddySvg, stageName } from '../buddy.js';
 import { escapeHtml, fmt, fmtDistance, toast } from '../fx.js';
-import { distanceM, pathLengthM, pointAlong } from '../geo.js';
-import { gps } from '../gps.js';
-import { prepareCharacter } from '../rig.js';
+import { bearingDeg, distanceM, pathLengthM, pointAlong } from '../geo.js';
+import { gps, markVisibilityChosen, visibilityChosen } from '../gps.js';
+import { icons } from '../icons.js';
+import { HEIGHT, prepareCharacter } from '../rig.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
+import { playBattle } from './battle.js';
 import { pointIcon } from './home.js';
 
 const WASHINGTON_SQUARE_PARK = { lng: -73.99733, lat: 40.73082 };
@@ -26,6 +29,26 @@ const IDLE_AFTER_MS = 3000;
 const CROSSFADE_S = 0.4;
 // Further than this from its target the buddy jumps instead of sliding there.
 const TELEPORT_M = 200;
+const NEARBY_POLL_MS = 10_000;
+const FOCUS_ZOOM = 20;
+// Retro look: characters are full size at street zoom and shrink with the map
+// as it zooms out, down to this fraction so they can still be seen and tapped.
+const STREET_ZOOM = 18;
+const MIN_ZOOMED_OUT_SCALE = 0.3;
+// Seeded demo buddies walk a circle this big, this fast, around their spot.
+const DEMO_CIRCLE_M = 15;
+const DEMO_PACE_MPS = 1.3;
+// A demo buddy keeps its spot until you've walked this far from it.
+const DEMO_RESPOT_M = 500;
+
+/** The point `north` and `east` metres from `point`. */
+function offsetM(point, north, east) {
+  const metresPerDegree = 111_320;
+  return {
+    lat: point.lat + north / metresPerDegree,
+    lng: point.lng + east / (metresPerDegree * Math.cos((point.lat * Math.PI) / 180)),
+  };
+}
 
 // Characters the player can send out on the map. "beast" is the buddy itself,
 // tinted to its species; the others are drawn as they come.
@@ -113,10 +136,47 @@ const STATUS_TEXT = {
   unavailable: 'Location unavailable — showing Washington Square Park.',
 };
 
+/**
+ * Asks, the first time the map opens, whether friends may see you on theirs,
+ * and saves the answer. Nothing is shared until it is answered; later it can
+ * be changed in Settings.
+ */
+function chooseMapVisibility() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="sheet" role="dialog" aria-modal="true" aria-label="Who can see you">
+        <div class="sheet-head"><h2>Who can see you?</h2></div>
+        <p>Friends can see you on their map while you have the map open or are walking.
+          You can change this later in Settings.</p>
+        <button class="btn btn-block btn-primary" data-visible="true">Friends can see me</button>
+        <button class="btn btn-block" data-visible="false">Hide me</button>
+      </div>`;
+    document.body.append(overlay);
+    overlay.addEventListener('click', async (event) => {
+      const choice = event.target.closest('[data-visible]')?.dataset.visible;
+      if (!choice) return;
+      const buttons = overlay.querySelectorAll('[data-visible]');
+      buttons.forEach((button) => { button.disabled = true; });
+      try {
+        app.setState(await api('/me', { method: 'PATCH', body: { mapVisible: choice === 'true' } }));
+        markVisibilityChosen();
+        overlay.remove();
+        resolve();
+      } catch (err) {
+        toast(err.message, 'warn');
+        buttons.forEach((button) => { button.disabled = false; });
+      }
+    });
+  });
+}
+
 export function mount(el) {
   el.innerHTML = `
     <div class="map"><div id="map"></div></div>
     <canvas class="map-buddy" id="map-buddy" width="520" height="520" hidden></canvas>
+    <div class="map-tags" id="map-tags"></div>
     <div class="map-empty" id="map-empty" hidden>${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}</div>
     <div class="map-card" aria-live="off">
       <div><small>Distance</small><b id="map-distance"></b></div>
@@ -128,6 +188,12 @@ export function mount(el) {
     </div>
     <p class="map-credit" id="map-credit" hidden></p>
     <p class="map-status" id="map-status" aria-live="polite">Loading map…</p>
+    <div class="map-profile" id="map-profile" role="dialog" aria-label="Player" hidden></div>
+    <div class="map-zoom" role="group" aria-label="Zoom">
+      <button data-zoom="1" aria-label="Zoom in">+</button>
+      <button data-zoom="-1" aria-label="Zoom out">-</button>
+    </div>
+    <button class="map-recenter" id="map-recenter" aria-label="Back to your location" hidden>${icons.back}</button>
     <div class="map-controls">
       <button class="btn btn-primary" id="map-walk"></button>
       ${app.demo ? '<button class="btn btn-demo" id="map-demo">Demo Walk</button>' : ''}
@@ -143,10 +209,20 @@ export function mount(el) {
   let demoStartedWalk = false;
   // Where the model is drawn. Eases toward gps.position every frame.
   const shown = { ...(gps.position ?? WASHINGTON_SQUARE_PARK) };
-  let shownHeading = gps.heading;
-  let character = null; // { root, mixer, actions, current }
+  // Where the camera looks: on `shown`, unless a nearby player is being looked at.
+  const look = { ...shown };
   let avatar = savedAvatar();
   let showCharacter = () => {}; // set once the 3D scene exists
+  // Nearby players, by userId: { player, marker }.
+  const nearby = new Map();
+  let PlayerMarker = null; // set once Google Maps has loaded
+  let nearbyTimer = null;
+  // The player being looked at; the camera leaves the buddy for them until closed.
+  let focusId = null;
+  // The camera follows the buddy (or the player being looked at) until the map is dragged.
+  let following = true;
+  let savedZoom = null;
+  let busy = false;
 
   function updateCard() {
     const steps = walk.sessionSteps;
@@ -157,6 +233,7 @@ export function mount(el) {
     $('map-walk').textContent = walk.walking ? 'End Walk' : 'Start Walk';
     $('map-walk').className = `btn ${walk.walking ? 'btn-pink' : 'btn-primary'}`;
   }
+
 
   function setStatus(text) {
     $('map-status').textContent = text;
@@ -197,7 +274,6 @@ export function mount(el) {
     onGpsStatus();
     if (event.teleport || distanceM(shown, gps.position) > TELEPORT_M) {
       Object.assign(shown, gps.position);
-      shownHeading = gps.heading;
     }
   };
 
@@ -249,6 +325,120 @@ export function mount(el) {
     }, DEMO_TICK_MS);
   }
 
+  // Shares where we are (GPS may not fire while standing still), then shows
+  // which friends are about. Waits for the player to say who may see them.
+  async function refreshNearby() {
+    if (!PlayerMarker || !visibilityChosen()) return;
+    const here = gps.status === 'tracking' || gps.simulating ? gps.position : app.demo ? { ...shown } : null;
+    if (here) await gps.share(here);
+    const { players } = await api(`/nearby${app.demo ? '?demo=1' : ''}`);
+    if (destroyed) return;
+    const seen = new Set();
+    for (const player of players) {
+      seen.add(player.userId);
+      const entry = nearby.get(player.userId);
+      // The server places demo buddies around wherever you are now; keep each
+      // one's spot so it doesn't hop along with you.
+      if (entry && player.demo && distanceM(entry.player, player) < DEMO_RESPOT_M) {
+        Object.assign(player, { lat: entry.player.lat, lng: entry.player.lng });
+      }
+      if (entry) {
+        entry.player = player;
+        entry.marker.update(player);
+      } else {
+        nearby.set(player.userId, { player, marker: new PlayerMarker(player) });
+      }
+    }
+    for (const [id, entry] of nearby) {
+      if (seen.has(id) || id === focusId) continue; // keep the one being looked at
+      entry.marker.remove();
+      nearby.delete(id);
+    }
+  }
+
+  // Glide from wherever the view is now back to the buddy or the player being looked at.
+  function follow() {
+    const center = map.getCenter();
+    Object.assign(look, { lat: center.lat(), lng: center.lng() });
+    following = true;
+    $('map-recenter').hidden = true;
+  }
+
+  function openPlayer(id) {
+    if (!nearby.has(id)) return;
+    if (focusId === null) savedZoom = map.getZoom();
+    focusId = id;
+    follow();
+    map.setZoom(FOCUS_ZOOM);
+    el.querySelector('.map-controls').hidden = true;
+    const panel = $('map-profile');
+    panel.hidden = false;
+    panel.innerHTML = '<p class="muted">Loading…</p>';
+    loadProfile(id).catch((err) => {
+      toast(err.message, 'warn');
+      closePlayer();
+    });
+  }
+
+  async function loadProfile(id) {
+    const profile = await api(`/player?id=${id}`);
+    const distance = nearby.get(id)?.player.distanceM;
+    if (destroyed || focusId !== id) return;
+    const { buddy, record } = profile;
+    $('map-profile').innerHTML = `
+      <div class="map-profile-head">
+        <div class="opponent-art">${buddySvg(buddy)}<span class="art-level">Lv ${buddy.level}</span></div>
+        <div class="opponent-info">
+          <b>${escapeHtml(buddy.name)}</b>
+          <span>${stageName(buddy)}</span>
+          <small>@${escapeHtml(profile.username)}${distance === undefined ? '' : ` · ${fmtDistance(distance, { decimals: 1 })} away`}</small>
+        </div>
+        <button class="icon-btn" data-close-player aria-label="Close">X</button>
+      </div>
+      <div class="map-profile-stats">
+        <span class="stat-badge is-attack" aria-label="Attack ${buddy.attack}">${icons.sword}${buddy.attack}</span>
+        <span class="stat-badge is-evasion" aria-label="Evasion ${buddy.evasion}">${icons.dash}${buddy.evasion}</span>
+        <span>${record.wins}W ${record.losses}L ${record.draws}D</span>
+        <span>${fmt(profile.totalSteps)} steps</span>
+      </div>
+      <div class="map-profile-actions">
+        <button class="btn btn-primary" data-fight="${profile.userId}">${icons.sword}Battle</button>
+      </div>`;
+  }
+
+  function closePlayer() {
+    if (focusId === null) return;
+    focusId = null;
+    // The view stays on their spot; Recenter brings it back to you.
+    following = false;
+    $('map-recenter').hidden = false;
+    if (savedZoom !== null) map.setZoom(savedZoom);
+    savedZoom = null;
+    $('map-profile').hidden = true;
+    el.querySelector('.map-controls').hidden = false;
+  }
+
+  // One action at a time, so a double tap can't start two battles.
+  async function exclusive(action) {
+    if (busy) return;
+    busy = true;
+    try {
+      await action();
+    } catch (err) {
+      toast(err.message, 'warn');
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function fight(id) {
+    const { battle } = await api('/battles', { method: 'POST', body: { opponentId: id } });
+    const state = await playBattle(battle);
+    if (state) app.setState(state);
+    else await app.refresh();
+    if (focusId === id) await loadProfile(id); // their record changed
+  }
+
   async function init() {
     config ??= await api('/config');
     if (destroyed) return;
@@ -264,7 +454,9 @@ export function mount(el) {
     const in3d = Boolean(config.googleMapsMapId);
     map = new maps.Map($('map'), {
       center: { lat: shown.lat, lng: shown.lng },
-      zoom: 18,
+      zoom: STREET_ZOOM,
+      minZoom: 3, // far enough out to find friends in other cities
+      maxZoom: 21,
       ...(in3d
         ? { mapId: config.googleMapsMapId, renderingType: maps.RenderingType.VECTOR, colorScheme: 'DARK', tilt: 60, heading: -20 }
         : { styles: RETRO_STYLE }),
@@ -272,65 +464,166 @@ export function mount(el) {
       disableDefaultUI: true,
       clickableIcons: false,
       keyboardShortcuts: false,
-      // 3D: pinch, twist and tilt work and the camera re-centres on the buddy.
-      // Retro: the map is a fixed backdrop that scrolls under the buddy.
-      gestureHandling: in3d ? 'greedy' : 'none',
+      // Pinch zooms in both looks (3D also twists and tilts). Dragging moves the
+      // map freely until Recenter is tapped.
+      gestureHandling: 'greedy',
+    });
+    map.addListener('dragstart', () => {
+      following = false;
+      $('map-recenter').hidden = false;
     });
 
-    const buddy = app.state.buddy;
-    const palette = (SPECIES[buddy.species] ?? SPECIES.dragon).colors;
-    const tint = { Body: palette.b, Shade: palette.d, Belly: palette.l, Accent: palette.c, Horn: palette.a };
-    const stageScale = STAGE_SCALE[buddy.stage] ?? 1;
-    const scene = new THREE.Scene();
-    // `stand` holds the character upright in whichever space it is drawn in;
-    // `turner` spins it to its heading.
-    const stand = new THREE.Group();
-    const turner = new THREE.Group();
-    stand.add(new THREE.AmbientLight(0xffffff, 1.8));
-    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-    sun.position.set(1, 2, 1.5);
-    stand.add(sun, turner);
-    const shadow = new THREE.Mesh(
-      new THREE.CircleGeometry(0.55, 24),
-      new THREE.MeshBasicMaterial({ color: 0x0d0e17, transparent: true, opacity: 0.45, depthWrite: false }),
-    );
-    shadow.rotation.x = -Math.PI / 2;
-    shadow.position.y = 0.01;
-    stand.add(shadow);
-    scene.add(stand);
+    // Every character on the map is a figure: your buddy and each nearby player.
+    // `stand` holds it upright in whichever space it is drawn in; `turner` spins
+    // it to its heading. Each has its own scene so the 3D look can place it with
+    // its own matrix.
+    const figures = new Set();
+    let inMap = in3d; // drawn by the map's WebGL overlay (3D) or on our own canvas (retro)
 
+    function placeStand(fig) {
+      // The overlay's frame is metres with x east, y north, z up; models are Y-up.
+      fig.stand.rotation.x = inMap ? Math.PI / 2 : 0;
+      fig.stand.scale.setScalar((inMap ? MODEL_SCALE : 1) * fig.stageScale);
+    }
+
+    function makeFigure(stage, pos) {
+      const scene = new THREE.Scene();
+      const stand = new THREE.Group();
+      const turner = new THREE.Group();
+      stand.add(new THREE.AmbientLight(0xffffff, 1.8));
+      const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+      sun.position.set(1, 2, 1.5);
+      stand.add(sun, turner);
+      const shadow = new THREE.Mesh(
+        new THREE.CircleGeometry(0.55, 24),
+        new THREE.MeshBasicMaterial({ color: 0x0d0e17, transparent: true, opacity: 0.45, depthWrite: false }),
+      );
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.y = 0.01;
+      stand.add(shadow);
+      scene.add(stand);
+      // headPx: how far above its feet its head is drawn on screen, so its name tag clears it.
+      const fig = { scene, stand, turner, stageScale: STAGE_SCALE[stage] ?? 1, character: null, pos, heading: 0, headPx: 0 };
+      placeStand(fig);
+      figures.add(fig);
+      return fig;
+    }
+
+    const tintFor = (species) => {
+      const palette = (SPECIES[species] ?? SPECIES.dragon).colors;
+      return { Body: palette.b, Shade: palette.d, Belly: palette.l, Accent: palette.c, Horn: palette.a };
+    };
+
+    function setCharacter(fig, gltf, tint) {
+      if (tint) {
+        gltf.scene.traverse((node) => {
+          if (node.isMesh && tint[node.material.name]) node.material.color.set(tint[node.material.name]);
+        });
+      }
+      const { root, clips } = prepareCharacter(THREE, gltf);
+      if (fig.character) fig.turner.remove(fig.character.root);
+      fig.turner.add(root);
+      fig.character = { root, mixer: null, actions: null, current: 'Idle' };
+      if (clips) {
+        fig.character.mixer = new THREE.AnimationMixer(root);
+        fig.character.actions = {
+          Idle: fig.character.mixer.clipAction(clips.Idle),
+          Walking: fig.character.mixer.clipAction(clips.Walking),
+        };
+        fig.character.actions.Idle.play();
+      }
+    }
+
+    function animate(fig, wanted, dt) {
+      // A model facing +Z points south once placed on the map, hence the π.
+      fig.turner.rotation.y = Math.PI - (fig.heading * Math.PI) / 180;
+      const character = fig.character;
+      if (!character?.mixer) return;
+      if (wanted !== character.current) {
+        const from = character.actions[character.current];
+        const to = character.actions[wanted];
+        to.reset().play();
+        from.crossFadeTo(to, CROSSFADE_S, false);
+        character.current = wanted;
+      }
+      character.mixer.update(dt);
+    }
+
+    // Other players are always the beast, in their species' colours. The file is
+    // fetched once; each player parses their own copy so nothing is shared.
+    let beast = null;
+    const loadBeast = () => {
+      beast ??= fetch(AVATARS[0].url).then((res) => res.arrayBuffer());
+      return beast.then((buffer) => new GLTFLoader().parseAsync(buffer, ''));
+    };
+
+    // A nearby player: their 3D buddy on the map, under a tappable name tag.
+    // The tags live in their own layer over the characters' canvas so a
+    // character never covers one.
+    PlayerMarker = class extends maps.OverlayView {
+      constructor(player) {
+        super();
+        this.figure = makeFigure(player.buddy.stage, { lat: player.lat, lng: player.lng });
+        loadBeast().then((gltf) => {
+          if (figures.has(this.figure)) setCharacter(this.figure, gltf, tintFor(player.buddy.species));
+        }).catch((err) => console.error('[nearby]', err.message));
+        this.button = document.createElement('button');
+        this.button.className = 'map-player';
+        this.button.addEventListener('click', () => openPlayer(this.player.userId));
+        this.update(player);
+        this.setMap(map);
+      }
+
+      update(player) {
+        this.player = player;
+        this.button.setAttribute('aria-label', `${player.buddy.name}, @${player.username}, ${fmtDistance(player.distanceM, { decimals: 1 })} away`);
+        this.button.innerHTML = `<span>Lv ${player.buddy.level} @${escapeHtml(player.username)}</span>`;
+        this.draw();
+      }
+
+      onAdd() {
+        $('map-tags').append(this.button);
+      }
+
+      // The button runs from the character's feet up past its head, tag on top.
+      draw() {
+        const { lat, lng } = this.figure.pos;
+        const point = this.getProjection()?.fromLatLngToContainerPixel(new maps.LatLng(lat, lng));
+        if (!point) return;
+        this.button.style.left = `${point.x}px`;
+        this.button.style.top = `${point.y}px`;
+        this.button.style.height = `${Math.max(44, this.figure.headPx + 24)}px`;
+        this.button.style.setProperty('--head', `${this.figure.headPx}px`);
+      }
+
+      onRemove() {
+        this.button.remove();
+      }
+
+      remove() {
+        this.setMap(null);
+        figures.delete(this.figure);
+      }
+    };
+    const pollNearby = () => refreshNearby().catch((err) => console.error('[nearby]', err.message));
+    pollNearby();
+    nearbyTimer = setInterval(pollNearby, NEARBY_POLL_MS);
+
+    // Your own buddy, in the character picked on the Map tab.
+    const me = makeFigure(app.state.buddy.stage, shown);
     showCharacter = () => {
       const wanted = avatar;
       new GLTFLoader().load(wanted.url, (gltf) => {
         if (destroyed || wanted !== avatar) return; // another character was picked meanwhile
-        if (wanted.tinted) {
-          gltf.scene.traverse((node) => {
-            if (node.isMesh && tint[node.material.name]) node.material.color.set(tint[node.material.name]);
-          });
-        }
-        const { root, clips } = prepareCharacter(THREE, gltf);
-        if (character) turner.remove(character.root);
-        turner.add(root);
-        character = { root, mixer: null, actions: null, current: 'Idle' };
-        if (clips) {
-          character.mixer = new THREE.AnimationMixer(root);
-          character.actions = {
-            Idle: character.mixer.clipAction(clips.Idle),
-            Walking: character.mixer.clipAction(clips.Walking),
-          };
-          character.actions.Idle.play();
-        }
+        setCharacter(me, gltf, wanted.tinted && tintFor(app.state.buddy.species));
       }, undefined, () => toast(`Could not load ${wanted.name}.`, 'warn'));
     };
     showCharacter();
 
-    // --- 3D: draw into the map's own WebGL scene.
+    // --- 3D: draw into the map's own WebGL scene, each figure at its own spot.
     function drawInMap() {
       const camera = new THREE.Camera();
       let renderer = null;
-      // The overlay's frame is metres with x east, y north, z up; models are Y-up.
-      stand.rotation.x = Math.PI / 2;
-      stand.scale.setScalar(MODEL_SCALE * stageScale);
       overlay = new maps.WebGLOverlayView();
       overlay.onContextRestored = ({ gl }) => {
         renderer = new THREE.WebGLRenderer({ canvas: gl.canvas, context: gl, ...gl.getContextAttributes() });
@@ -342,31 +635,79 @@ export function mount(el) {
       };
       overlay.onDraw = ({ transformer }) => {
         if (!renderer) return;
-        const matrix = transformer.fromLatLngAltitude({ lat: shown.lat, lng: shown.lng, altitude: 0 });
-        camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
-        renderer.render(scene, camera);
+        const screenHeight = $('map').clientHeight;
+        for (const fig of figures) {
+          const matrix = transformer.fromLatLngAltitude({ lat: fig.pos.lat, lng: fig.pos.lng, altitude: 0 });
+          camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
+          renderer.render(fig.scene, camera);
+          // Where the top of the head lands: the matrix's last column is the point itself in clip space.
+          const head = transformer.fromLatLngAltitude({
+            lat: fig.pos.lat, lng: fig.pos.lng, altitude: HEIGHT * MODEL_SCALE * fig.stageScale,
+          });
+          fig.headPx = ((head[13] / head[15] - matrix[13] / matrix[15]) / 2) * screenHeight;
+        }
         renderer.resetState(); // hand the GL state back to the map as we found it
       };
       overlay.setMap(map);
       return () => overlay?.requestRedraw();
     }
 
-    // --- Retro: the map is flat and north-up, and always centred on the buddy,
-    // so the character is drawn on its own canvas over the middle of the screen,
-    // seen from the south at 45° with its feet on the centre point.
+    // --- Retro: the map is flat and north-up, so the characters are drawn on
+    // our own canvas over the whole map, seen from the south at 45°. Each one's
+    // feet go where its map position lands on screen.
     function drawOnTop() {
       overlay?.setMap(null);
       overlay = null;
-      stand.rotation.x = 0;
-      stand.scale.setScalar(stageScale);
+      inMap = false;
+      figures.forEach(placeStand);
       const canvas = $('map-buddy');
       canvas.hidden = false;
       const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
+      renderer.autoClear = false;
+      renderer.setClearColor(0x000000, 0); // see-through until a character draws over the map
+      renderer.setPixelRatio(2);
       const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
       camera.position.set(0, 7, 7);
       camera.lookAt(0, 0, 0);
-      dispose = () => renderer.dispose();
-      return () => renderer.render(scene, camera);
+      camera.updateMatrixWorld(); // the ray casts below need it before the first render
+      const raycaster = new THREE.Raycaster();
+      const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      const ndc = new THREE.Vector2();
+      const head = new THREE.Vector3();
+      // Only here for its projection: map position -> screen pixel.
+      const projector = Object.assign(new maps.OverlayView(), { onAdd() {}, draw() {}, onRemove() {} });
+      projector.setMap(map);
+      let width = 0;
+      let height = 0;
+      dispose = () => {
+        projector.setMap(null);
+        renderer.dispose();
+      };
+      return () => {
+        const projection = projector.getProjection();
+        if (!projection) return;
+        if (canvas.clientWidth !== width || canvas.clientHeight !== height) {
+          width = canvas.clientWidth;
+          height = canvas.clientHeight;
+          renderer.setSize(width, height, false);
+          // Characters stay the size they were in the old 260px box at 30°.
+          camera.aspect = width / height;
+          camera.fov = (2 * Math.atan(Math.tan((15 * Math.PI) / 180) * (height / 260)) * 180) / Math.PI;
+          camera.updateProjectionMatrix();
+        }
+        renderer.clear();
+        const zoomScale = Math.max(MIN_ZOOMED_OUT_SCALE, Math.min(1, 2 ** (map.getZoom() - STREET_ZOOM)));
+        for (const fig of figures) {
+          fig.stand.scale.setScalar(fig.stageScale * zoomScale);
+          const pixel = projection.fromLatLngToContainerPixel(new maps.LatLng(fig.pos.lat, fig.pos.lng));
+          ndc.set((pixel.x / width) * 2 - 1, 1 - (pixel.y / height) * 2);
+          raycaster.setFromCamera(ndc, camera);
+          if (!raycaster.ray.intersectPlane(ground, fig.stand.position)) continue;
+          renderer.render(fig.scene, camera);
+          head.copy(fig.stand.position).setY(HEIGHT * fig.stageScale * zoomScale).project(camera);
+          fig.headPx = pixel.y - ((1 - head.y) / 2) * height;
+        }
+      };
     }
 
     let draw = in3d ? drawInMap() : drawOnTop();
@@ -390,24 +731,47 @@ export function mount(el) {
         shown.lng += (target.lng - shown.lng) * ease;
         shown.lat += (target.lat - shown.lat) * ease;
         // Turn the short way round.
-        const turn = ((gps.heading - shownHeading + 540) % 360) - 180;
-        shownHeading += turn * (1 - Math.exp(-dt * 6));
+        const turn = ((gps.heading - me.heading + 540) % 360) - 180;
+        me.heading += turn * (1 - Math.exp(-dt * 6));
       }
-      if (character?.mixer) {
-        const wanted = now - gps.lastMovedAt < IDLE_AFTER_MS ? 'Walking' : 'Idle';
-        if (wanted !== character.current) {
-          const from = character.actions[character.current];
-          const to = character.actions[wanted];
-          to.reset().play();
-          from.crossFadeTo(to, CROSSFADE_S, false);
-          character.current = wanted;
+      animate(me, now - gps.lastMovedAt < IDLE_AFTER_MS ? 'Walking' : 'Idle', dt);
+
+      for (const { player, marker } of nearby.values()) {
+        const fig = marker.figure;
+        if (player.demo) {
+          // Seeded buddies pace a small circle around their spot, always walking.
+          const angle = (now / 1000) * (DEMO_PACE_MPS / DEMO_CIRCLE_M) + player.userId * 2;
+          fig.pos = offsetM(player, DEMO_CIRCLE_M * Math.sin(angle), DEMO_CIRCLE_M * Math.cos(angle));
+          fig.heading = (Math.atan2(-Math.sin(angle), Math.cos(angle)) * 180) / Math.PI;
+          animate(fig, 'Walking', dt);
+        } else {
+          // Real players glide to where they last reported over about one poll.
+          const gap = distanceM(fig.pos, player);
+          if (gap > TELEPORT_M) {
+            fig.pos = { lat: player.lat, lng: player.lng };
+          } else if (gap > 1) {
+            fig.heading = bearingDeg(fig.pos, player);
+            const ease = 1 - Math.exp(-dt * 0.5);
+            fig.pos = { lat: fig.pos.lat + (player.lat - fig.pos.lat) * ease, lng: fig.pos.lng + (player.lng - fig.pos.lng) * ease };
+          }
+          animate(fig, gap > 1 ? 'Walking' : 'Idle', dt);
         }
-        character.mixer.update(dt);
+        marker.draw();
       }
-      // A model facing +Z points south once placed on the map, hence the π.
-      turner.rotation.y = Math.PI - (shownHeading * Math.PI) / 180;
-      // Keep the camera on the buddy; zoom, heading and tilt stay as the player set them.
-      map.moveCamera({ center: { lat: shown.lat, lng: shown.lng } });
+
+      // Keep the camera on the buddy, or glide to the player being looked at;
+      // zoom, heading and tilt stay as the player set them.
+      if (following) {
+        const goal = nearby.get(focusId)?.marker.figure.pos ?? shown;
+        if (focusId === null && distanceM(look, shown) < 2) {
+          Object.assign(look, { lat: shown.lat, lng: shown.lng });
+        } else {
+          const glide = 1 - Math.exp(-dt * 5);
+          look.lat += (goal.lat - look.lat) * glide;
+          look.lng += (goal.lng - look.lng) * glide;
+        }
+        map.moveCamera({ center: { lat: look.lat, lng: look.lng } });
+      }
       draw();
       frame = requestAnimationFrame(tick);
     };
@@ -416,7 +780,16 @@ export function mount(el) {
 
   const onClick = (event) => {
     const avatarButton = event.target.closest('[data-avatar]');
+    const hit = (name) => event.target.closest(`[data-${name}]`)?.dataset[name];
     if (avatarButton) chooseAvatar(avatarButton.dataset.avatar);
+    else if (event.target.closest('[data-close-player]')) closePlayer();
+    else if (hit('zoom')) map?.setZoom(map.getZoom() + Number(hit('zoom')));
+    else if (event.target.closest('#map-recenter') && map) {
+      closePlayer();
+      follow();
+      map.setZoom(map.getZoom() + 1); // a little closer on the way back
+    }
+    else if (hit('fight')) exclusive(() => fight(Number(hit('fight'))));
     else if (event.target.closest('#map-walk')) toggleWalk().catch((err) => toast(err.message, 'warn'));
     else if (event.target.closest('#map-demo')) demoWalk().catch((err) => toast(err.message, 'warn'));
   };
@@ -427,6 +800,9 @@ export function mount(el) {
   updateCard();
   updateAvatarPicker();
   gps.open();
+  if (!visibilityChosen()) {
+    chooseMapVisibility().then(() => refreshNearby()).catch((err) => console.error('[nearby]', err.message));
+  }
   init().catch((err) => {
     console.error(err);
     if (!destroyed) showProblem(`${err.message}. Check your connection and reopen the Map tab.`);
@@ -437,6 +813,8 @@ export function mount(el) {
     destroy() {
       destroyed = true;
       cancelAnimationFrame(frame);
+      clearInterval(nearbyTimer);
+      for (const { marker } of nearby.values()) marker.remove();
       if (demoTimer) {
         stopDemo();
         if (demoStartedWalk) walk.stop();
