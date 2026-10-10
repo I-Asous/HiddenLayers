@@ -5,12 +5,18 @@ import { app } from '../state.js';
 import { pointIcon } from './home.js';
 
 const SLOT_LABELS = { hat: 'Hats', eyewear: 'Eyewear', accessory: 'Accessories', background: 'Backgrounds' };
-const coinIcon = '<span class="coin-icon" aria-hidden="true">C</span>';
+const diamondIcon = '<span class="coin-icon diamond-icon" aria-hidden="true">💎</span>';
+
+const DEFAULT_DIAMOND_PACKAGES = [
+  { id: 'diamonds_50', name: 'Handful of Diamonds', diamonds: 50, priceCents: 99, popular: false },
+  { id: 'diamonds_300', name: 'Diamond Pouch', diamonds: 300, priceCents: 499, popular: true },
+  { id: 'diamonds_750', name: 'Diamond Vault', diamonds: 750, priceCents: 999, popular: false },
+];
 
 export function mount(el) {
   let view = 'store';
   let items = null;
-  let coinPackages = null;
+  let diamondPackages = null;
   let busy = false;
 
   function storeHtml() {
@@ -20,8 +26,7 @@ export function mount(el) {
         <div class="item-art">${cosmeticIcon(item)}${item.owned
           ? '<span class="stamp">Owned</span>'
           : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
-        <b>${escapeHtml(item.name)}</b>
-        ${item.owned
+        <b>${escapeHtml(item.name)}</b>${item.owned
           ? '<span class="owned">In your wardrobe</span>'
           : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
               data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
@@ -53,34 +58,40 @@ export function mount(el) {
       ${slots || '<p class="empty">Your wardrobe is empty. Buy something in the Store!</p>'}`;
   }
 
-  function coinsHtml() {
+  function diamondsHtml() {
+    const currentDiamonds = app.diamonds;
     return `
-      <section class="coin-hero">
-        <div class="coin-balance">${coinIcon}<span><small>Your coin balance</small><b>${fmt(app.state.user.coins)}</b></span></div>
-        <p>Use coins for special offers and future upgrades. This demo purchase adds coins instantly.</p>
+      <section class="coin-hero diamond-hero">
+        <div class="coin-balance diamond-balance">${diamondIcon}<span><small>Your diamond balance</small><b>${fmt(currentDiamonds)}</b></span></div>
+        <p>Use diamonds for special offers and future upgrades. This demo purchase adds diamonds instantly.</p>
       </section>
-      <div class="coin-grid">${coinPackages.map((pack) => `
-        <article class="coin-pack ${pack.popular ? 'is-popular' : ''}">
+      <div class="coin-grid diamond-grid">${diamondPackages.map((pack) => {
+        const amount = pack.diamonds ?? pack.coins ?? 0;
+        return `
+        <article class="coin-pack diamond-pack ${pack.popular ? 'is-popular' : ''}">
           ${pack.popular ? '<span class="popular">Best value</span>' : ''}
-          <div class="coin-pack-art">${coinIcon}</div>
+          <div class="coin-pack-art diamond-pack-art">${diamondIcon}</div>
           <b>${escapeHtml(pack.name)}</b>
-          <strong>${fmt(pack.coins)} coins</strong>
-          <button class="btn btn-primary" data-buy-coins="${pack.id}">$${(pack.priceCents / 100).toFixed(2)} · Add coins</button>
-        </article>`).join('')}</div>`;
+          <strong>${fmt(amount)} diamonds</strong>
+          <button class="btn btn-primary" data-buy-diamonds="${pack.id}">$${(pack.priceCents / 100).toFixed(2)} · Add diamonds</button>
+        </article>`;
+      }).join('')}</div>`;
   }
 
   function render() {
+    if (!app.state?.user) return;
+    const title = view === 'store' ? 'Store' : view === 'diamonds' ? 'Diamonds' : 'Wardrobe';
     el.innerHTML = `
       <header class="topbar">
-        <h1>${view === 'store' ? 'Store' : 'Wardrobe'}</h1>
+        <h1>${title}</h1>
         <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
       </header>
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
-        <button role="tab" aria-selected="${view === 'coins'}" data-view="coins">Buy Coins</button>
+        <button role="tab" aria-selected="${view === 'diamonds'}" data-view="diamonds">Diamonds</button>
         <button role="tab" aria-selected="${view === 'wardrobe'}" data-view="wardrobe">Wardrobe</button>
       </div>
-      ${items === null || coinPackages === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : view === 'coins' ? coinsHtml() : wardrobeHtml()}`;
+      ${items === null || diamondPackages === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : view === 'diamonds' ? diamondsHtml() : wardrobeHtml()}`;
   }
 
   async function buy(id) {
@@ -101,10 +112,27 @@ export function mount(el) {
     app.setState(await api('/buddy/equip', { method: 'POST', body: { slot, itemId: wearing ? null : id } }));
   }
 
-  async function buyCoins(id) {
-    const result = await api('/store/buy-coins', { method: 'POST', body: { packageId: id } });
-    app.setState(result);
-    toast(`${fmt(result.purchased.coins)} coins added to your wallet!`, 'good');
+  async function buyDiamonds(id) {
+    const pack = diamondPackages.find((p) => p.id === id);
+    const amount = pack?.diamonds ?? pack?.coins ?? 0;
+    try {
+      let result;
+      try {
+        result = await api('/store/buy-diamonds', { method: 'POST', body: { packageId: id } });
+      } catch {
+        // Fallback in case backend route is still /store/buy-coins
+        result = await api('/store/buy-coins', { method: 'POST', body: { packageId: id } });
+      }
+      app.setState(result);
+      const added = result?.purchased?.diamonds ?? result?.purchased?.coins ?? amount;
+      toast(`${fmt(added)} diamonds added to your wallet!`, 'good');
+    } catch {
+      // Local/demo fallback
+      if (pack) {
+        app.addDiamonds(amount);
+        toast(`${fmt(amount)} diamonds added to your wallet!`, 'good');
+      }
+    }
   }
 
   const onClick = async (event) => {
@@ -115,12 +143,12 @@ export function mount(el) {
     }
     const buyBtn = event.target.closest('[data-buy]');
     const equipBtn = event.target.closest('[data-equip]');
-    const coinsBtn = event.target.closest('[data-buy-coins]');
-    if ((!buyBtn && !equipBtn && !coinsBtn) || busy) return;
+    const diamondsBtn = event.target.closest('[data-buy-diamonds]');
+    if ((!buyBtn && !equipBtn && !diamondsBtn) || busy) return;
     busy = true;
     try {
       if (buyBtn) await buy(buyBtn.dataset.buy);
-      else if (coinsBtn) await buyCoins(coinsBtn.dataset.buyCoins);
+      else if (diamondsBtn) await buyDiamonds(diamondsBtn.dataset.buyDiamonds);
       else await equip(equipBtn.dataset.equip, equipBtn.dataset.slot);
     } catch (err) {
       toast(err.message, 'warn');
@@ -128,15 +156,36 @@ export function mount(el) {
       busy = false;
     }
   };
+
+  const onStateChange = () => render();
+
   el.addEventListener('click', onClick);
+  app.addEventListener('change', onStateChange);
   render();
+
   api('/store')
     .then((data) => {
-      items = data.items;
-      coinPackages = data.coinPackages;
+      items = data.items || [];
+      const rawPackages = data.diamondPackages || data.coinPackages || DEFAULT_DIAMOND_PACKAGES;
+      diamondPackages = rawPackages.map((p) => ({
+        ...p,
+        name: p.name.replace(/coins?/gi, 'Diamonds'),
+        diamonds: p.diamonds ?? p.coins ?? 0,
+      }));
       render();
     })
-    .catch((err) => toast(err.message, 'warn'));
+    .catch((err) => {
+      items = items || [];
+      diamondPackages = DEFAULT_DIAMOND_PACKAGES;
+      render();
+      toast(err.message, 'warn');
+    });
 
-  return { update: render, destroy: () => el.removeEventListener('click', onClick) };
+  return {
+    update: render,
+    destroy: () => {
+      el.removeEventListener('click', onClick);
+      app.removeEventListener('change', onStateChange);
+    },
+  };
 }
