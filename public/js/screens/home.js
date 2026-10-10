@@ -1,19 +1,21 @@
 import { api } from '../api.js';
 import { SPECIES, buddySvg, stageName } from '../buddy.js';
 import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
+import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { openProfile } from './profile.js';
 
 const NEXT_STAGE = { egg: ['baby', 1, 5], baby: ['teen', 5, 10], teen: ['adult', 10, 20] };
 
-function upgradeButton(type, label, detail, cost, points) {
+function upgradeButton(type, icon, label, detail, cost, points) {
   const short = points < cost;
   return `
     <button class="upgrade ${short ? 'is-short' : ''}" data-upgrade="${type}" aria-disabled="${short}">
+      ${icon}
       <span class="upgrade-label">${label}</span>
       <span class="upgrade-detail">${detail}</span>
-      <span class="cost">${pointIcon}${fmt(cost)}</span>
+      <span class="cost">${short ? `Need ${fmt(cost - points)}` : `${pointIcon}${fmt(cost)}`}</span>
     </button>`;
 }
 
@@ -31,16 +33,14 @@ export function mount(el) {
     const { user, buddy, record } = app.state;
     const today = app.todaySteps;
     const speaking = app.spoken && app.spoken.until > Date.now();
-    const goalPct = Math.min(100, (today / user.dailyGoal) * 100);
     const next = NEXT_STAGE[buddy.stage];
     const nextTitle = next && (SPECIES[buddy.species] ?? SPECIES.dragon).titles[next[0]];
     const evolveHtml = next
       ? `<div class="evolve">
-          <div class="evolve-text"><span>Evolves into ${nextTitle} at Lv ${next[2]}</span>
-            <span>Lv ${buddy.level}</span></div>
+          <div class="evolve-text"><span>Lv ${buddy.level}</span><span>${nextTitle} at Lv ${next[2]}</span></div>
           <div class="bar"><i style="width:${((buddy.level - next[1]) / (next[2] - next[1])) * 100}%"></i></div>
         </div>`
-      : '<div class="evolve"><div class="evolve-text"><span>Fully grown!</span><span>Lv ' + buddy.level + '</span></div></div>';
+      : '<div class="evolve"><div class="evolve-text"><span>Fully grown!</span></div></div>';
 
     el.innerHTML = `
       <header class="topbar">
@@ -53,35 +53,34 @@ export function mount(el) {
       </header>
 
       <section class="stage-card">
+        <div class="scene-hud">
+          <span class="hud-badge hud-level">Lv ${buddy.level}</span>
+          <span class="hud-badge" aria-label="${today} steps today">${icons.boot}${fmt(today)}</span>
+        </div>
         <div class="bubble home-bubble" aria-live="polite" ${speaking ? '' : 'hidden'}>${speaking ? escapeHtml(app.spoken.text) : ''}</div>
         ${buddySvg(buddy, { className: `is-idle ${today === 0 && !walk.walking ? 'is-sleepy' : ''}` })}
         <div class="nameplate">
-          <b>${escapeHtml(buddy.name)}</b>
-          <span>Lv ${buddy.level} ${stageName(buddy)} · ${fmt(buddy.xp)} XP</span>
+          <div>
+            <b>${escapeHtml(buddy.name)}</b>
+            <span>${stageName(buddy)} · ${fmt(buddy.xp)} XP</span>
+          </div>
+          <div class="nameplate-stats">
+            <span class="stat-badge is-attack" aria-label="Attack ${buddy.attack}">${icons.sword}${buddy.attack}</span>
+            <span class="stat-badge is-evasion" aria-label="Evasion ${buddy.evasion}">${icons.dash}${buddy.evasion}</span>
+          </div>
+          <button class="btn btn-pink icon-talk" id="talk-btn" aria-label="Talk to ${escapeHtml(buddy.name)}">
+            <svg viewBox="0 0 8 8" width="20" height="20" shape-rendering="crispEdges" aria-hidden="true"><path
+              fill="currentColor" d="M1 1h6v4h-3v1h-1v1h-1v-2h-1z"/></svg>
+          </button>
         </div>
-        <p class="traits">${escapeHtml([
-          `Feeling ${buddy.mood}`, ...(buddy.personality ? [...buddy.personality.traits, buddy.personality.quirk] : []),
-        ].join(' · '))}</p>
+        ${evolveHtml}
       </section>
 
-      ${evolveHtml}
-
       <div class="upgrades">
-        ${upgradeButton('level', 'Level Up', `Lv ${buddy.level} → ${buddy.level + 1}`, buddy.costs.level, user.points)}
-        ${upgradeButton('attack', '+1 Attack', `${buddy.attack} → ${buddy.attack + 1}`, buddy.costs.attack, user.points)}
-        ${upgradeButton('evasion', '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
-      </div>
-
-      <button class="btn btn-pink btn-block" id="talk-btn">
-        <svg viewBox="0 0 8 8" width="16" height="16" shape-rendering="crispEdges" aria-hidden="true"><path
-          fill="currentColor" d="M1 1h6v4h-3v1h-1v1h-1v-2h-1z"/></svg>
-        Talk to ${escapeHtml(buddy.name)}
-      </button>
-
-      <a class="today-card" href="#walk">
-        <div><small>Today</small><b>${fmt(today)}</b> <span>/ ${fmt(user.dailyGoal)} steps</span></div>
-        <div class="bar"><i style="width:${goalPct}%"></i></div>
-      </a>`;
+        ${upgradeButton('level', icons.arrowUp, 'Level Up', `Lv ${buddy.level} → ${buddy.level + 1}`, buddy.costs.level, user.points)}
+        ${upgradeButton('attack', icons.sword, '+1 Attack', `${buddy.attack} → ${buddy.attack + 1}`, buddy.costs.attack, user.points)}
+        ${upgradeButton('evasion', icons.dash, '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
+      </div>`;
   }
 
   async function upgrade(type) {
@@ -163,19 +162,14 @@ export function mount(el) {
       app.refresh().catch(() => {});
     }
   }, 1000);
-  // Steps arrive a couple of times a second during a walk. Only the step card
-  // is touched for those, so the buddy's animation isn't restarted each time.
+  // Steps arrive a couple of times a second during a walk. Only re-render when
+  // walking starts or stops, so the buddy's animation isn't restarted each time.
   let wasWalking = walk.walking;
   const onWalk = () => {
     if (walk.walking !== wasWalking) {
       wasWalking = walk.walking;
-      return render();
+      render();
     }
-    const card = el.querySelector('.today-card');
-    if (!card) return;
-    const today = app.todaySteps;
-    card.querySelector('b').textContent = fmt(today);
-    card.querySelector('.bar i').style.width = `${Math.min(100, (today / app.state.user.dailyGoal) * 100)}%`;
   };
   walk.addEventListener('change', onWalk);
   render();

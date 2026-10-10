@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { buddySvg, stageName } from '../buddy.js';
 import { buddySay, confetti, escapeHtml, fmt, reducedMotion, sleep, toast } from '../fx.js';
+import { icons } from '../icons.js';
 import { app } from '../state.js';
 
 const BOARDS = {
@@ -9,18 +10,18 @@ const BOARDS = {
   level: { label: 'Level', unit: 'buddy level' },
 };
 
-const segmented = (name, options, selected) => `
-  <div class="segmented" role="tablist">${Object.entries(options).map(([value, label]) => `
+const segmented = (name, options, selected, extra = '') => `
+  <div class="segmented ${extra}" role="tablist">${Object.entries(options).map(([value, label]) => `
     <button role="tab" aria-selected="${value === selected}" data-${name}="${value}">${label}</button>`).join('')}
   </div>`;
 
 function buddyRow(o, detail, actions) {
   return `
     <li class="opponent">
-      <div class="opponent-art">${buddySvg(o)}</div>
+      <div class="opponent-art">${buddySvg(o)}<span class="art-level">Lv ${o.level}</span></div>
       <div class="opponent-info">
         <b>${escapeHtml(o.name)}</b>
-        <span>Lv ${o.level} ${stageName(o)}</span>
+        <span>${stageName(o)}</span>
         <small>@${escapeHtml(o.username)}${detail}</small>
       </div>
       <div class="opponent-actions">${actions}</div>
@@ -48,13 +49,15 @@ export function mount(el) {
       </form>`;
     if (friends === null) return `${form}<p class="empty">Loading friends…</p>`;
     if (!friends.length) {
-      return `${form}<p class="empty">No friends yet. Add one above to battle them and race them on the
-        leaderboard — try mira, theo or ana.</p>`;
+      return `${form}<div class="empty-buddy">
+        <p class="bubble">No friends yet! Add one above to battle and race them — try mira, theo or ana.</p>
+        ${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}
+      </div>`;
     }
     return `${form}<ul class="opponents">${friends.map((f) => buddyRow(
       f,
       ` · you ${f.headToHead.wins}–${f.headToHead.losses}`,
-      `<button class="btn btn-primary btn-small" data-challenge="${f.userId}">Battle</button>
+      `<button class="btn btn-primary btn-small" data-challenge="${f.userId}">${icons.sword}Battle</button>
        <button class="btn btn-ghost btn-small" data-remove="${f.userId}"
          aria-label="Remove ${escapeHtml(f.username)} from friends">Remove</button>`,
     )).join('')}</ul>`;
@@ -66,24 +69,37 @@ export function mount(el) {
     return `<ul class="opponents">${opponents.map((o) => buddyRow(
       o,
       '',
-      `<button class="btn btn-primary btn-small" data-challenge="${o.userId}">Battle</button>
+      `<button class="btn btn-primary btn-small" data-challenge="${o.userId}">${icons.sword}Battle</button>
        ${o.isFriend
         ? '<span class="tag is-win">Friend</span>'
-        : `<button class="btn btn-small" data-add="${escapeHtml(o.username)}">+ Friend</button>`}`,
+        : `<button class="btn btn-small btn-icon" data-add="${escapeHtml(o.username)}"
+            aria-label="Add ${escapeHtml(o.username)} as a friend">${icons.plus}</button>`}`,
     )).join('')}</ul>`;
   }
 
   function ranksHtml() {
     const controls = `
-      ${segmented('board', Object.fromEntries(Object.entries(BOARDS).map(([id, b]) => [id, b.label])), board)}
-      ${segmented('scope', { friends: 'Friends', all: 'Everyone' }, scope)}`;
+      ${segmented('board', Object.fromEntries(Object.entries(BOARDS).map(([id, b]) => [id, b.label])), board, 'segmented-sub')}
+      ${segmented('scope', { friends: 'Friends', all: 'Everyone' }, scope, 'segmented-sub')}`;
     if (ranks === null) return `${controls}<p class="empty">Tallying scores…</p>`;
     const alone = scope === 'friends' && ranks.length <= 1
       ? '<p class="hint">Add friends to see how you stack up against them.</p>'
       : '';
+    // With three or more on the board, the top three stand on a podium.
+    const top = ranks.length >= 3 ? ranks.slice(0, 3) : [];
+    const podium = top.length ? `
+      <div class="podium">${[[top[1], 2], [top[0], 1], [top[2], 3]].map(([entry, place]) => `
+        <div class="podium-col place-${place} ${entry.isMe ? 'is-me' : ''}">
+          <div class="podium-art">${buddySvg(entry.buddy, { background: false, className: place === 1 ? 'is-idle' : '' })}</div>
+          <b>${escapeHtml(entry.buddy.name)}</b>
+          <small>@${escapeHtml(entry.username)}${entry.isMe ? ' · you' : ''}</small>
+          <div class="podium-step"><span>${entry.rank}</span><em>${fmt(entry.value)}</em></div>
+        </div>`).join('')}
+      </div>` : '';
+    const rest = ranks.slice(top.length);
     return `${controls}
-      <p class="hint hint-top">Ranked by ${BOARDS[board].unit}.</p>
-      <ol class="board">${ranks.map((entry) => `
+      <p class="hint hint-top">Ranked by ${BOARDS[board].unit}.</p>${podium}
+      ${rest.length ? `<ol class="board" start="${top.length + 1}">${rest.map((entry) => `
         <li class="${entry.isMe ? 'is-me' : ''}">
           <span class="rank rank-${Math.min(entry.rank, 4)}">${entry.rank}</span>
           <div class="board-art">${buddySvg(entry.buddy)}</div>
@@ -92,7 +108,7 @@ export function mount(el) {
             <small>@${escapeHtml(entry.username)}${entry.isMe ? ' · you' : ''}</small>
           </div>
           <span class="board-value">${fmt(entry.value)}</span>
-        </li>`).join('')}</ol>${alone}`;
+        </li>`).join('')}</ol>` : ''}${alone}`;
   }
 
   function render() {
@@ -101,7 +117,8 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <h1>Battle</h1>
-        <div class="record-pill"><b>${record.wins}</b> W · <b>${record.losses}</b> L</div>
+        <div class="record-pill" aria-label="${record.wins} wins, ${record.losses} losses">
+          <span class="is-win">${record.wins} W</span><span class="is-loss">${record.losses} L</span></div>
       </header>
       ${segmented('view', { friends: 'Friends', everyone: 'Everyone', ranks: 'Ranks' }, view)}
       ${view === 'ranks' ? '' : `<p class="hint hint-top">${escapeHtml(buddy.name)} has ${buddy.attack} attack and
@@ -215,7 +232,7 @@ function fighterHtml(side, buddy, subtitle, hpMax) {
   return `
     <div class="fighter" data-side="${side}">
       <div class="fighter-name"><b>${escapeHtml(buddy.name)}</b><small>${escapeHtml(subtitle)}</small></div>
-      <div class="hp" role="img"><i style="width:100%"></i><span>${hpMax}</span></div>
+      <div class="hp" role="img" aria-label="${escapeHtml(buddy.name)} HP"><i style="width:100%"></i><span>${hpMax}</span></div>
       <div class="fighter-art">${buddySvg(buddy, { background: false })}</div>
     </div>`;
 }

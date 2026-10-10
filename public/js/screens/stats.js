@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { fmt, toast } from '../fx.js';
+import { icons } from '../icons.js';
 
 const W = 340;
 const H = 170;
@@ -26,7 +27,7 @@ function axes(max, goal) {
     <text x="${PAD.left - 6}" y="${y(tick) + 4}" text-anchor="end" class="axis-text">${compact(tick)}</text>`).join('');
   const goalLine = `
     <line x1="${PAD.left}" x2="${W - PAD.right}" y1="${y(goal)}" y2="${y(goal)}" class="goal-line"/>
-    <text x="${W - PAD.right + 5}" y="${y(goal) + 4}" class="axis-text goal-text">Goal</text>`;
+    <text x="${W - PAD.right}" y="${y(goal) - 5}" text-anchor="end" class="axis-text goal-text">Goal</text>`;
   return { y, grid, goalLine };
 }
 
@@ -39,11 +40,13 @@ function barChart(days, goal) {
     const x = PAD.left + slot * i + (slot - width) / 2;
     const top = y(day.steps);
     const height = PAD.top + PLOT_H - top;
+    // A lighter cap on top of each bar, like a lit pixel edge.
     const bar = height > 0
-      ? `<rect class="bar-mark" x="${x}" y="${top}" width="${width}" height="${height}"/>`
+      ? `<rect class="bar-mark" x="${x}" y="${top}" width="${width}" height="${height}"/>
+         <rect class="bar-cap" x="${x}" y="${top}" width="${width}" height="${Math.min(4, height)}"/>`
       : '';
     return `
-      <g class="bar-slot" data-index="${i}">
+      <g class="bar-slot ${i === days.length - 1 ? 'is-today' : ''}" data-index="${i}">
         <rect x="${PAD.left + slot * i}" y="${PAD.top}" width="${slot}" height="${PLOT_H + PAD.bottom}" fill="transparent"/>
         ${bar}
         <text x="${x + width / 2}" y="${H - 6}" text-anchor="middle" class="axis-text">${weekday.format(parse(day.date))}</text>
@@ -91,19 +94,19 @@ export function mount(el) {
 
       <div class="tiles">
         <div class="tile tile-wide">
-          <small>Today</small>
+          <small>${icons.boot}Today</small>
           <b>${fmt(stats.todaySteps)}</b>
-          <span>of ${fmt(stats.dailyGoal)} steps</span>
+          <span>${Math.floor((stats.todaySteps / stats.dailyGoal) * 100)}% of your ${fmt(stats.dailyGoal)}-step goal</span>
           <div class="bar"><i style="width:${Math.min(100, (stats.todaySteps / stats.dailyGoal) * 100)}%"></i></div>
         </div>
-        <div class="tile"><small>Current streak</small><b>${stats.streak}</b>
+        <div class="tile"><small>${icons.flame}Current streak</small><b>${stats.streak}</b>
           <span>${stats.streak === 1 ? 'day' : 'days'} hitting your goal</span></div>
-        <div class="tile"><small>Best day</small><b>${stats.bestDay ? fmt(stats.bestDay.steps) : '–'}</b>
+        <div class="tile"><small>${icons.trophy}Best day</small><b>${stats.bestDay ? fmt(stats.bestDay.steps) : '–'}</b>
           <span>${stats.bestDay ? shortDate.format(parse(stats.bestDay.date)) : 'No walks yet'}</span></div>
-        <div class="tile"><small>Total distance</small><b>${stats.distanceKm.toFixed(1)} km</b>
+        <div class="tile"><small>${icons.boot}Total distance</small><b>${stats.distanceKm.toFixed(1)} km</b>
           <span>${fmt(stats.totalSteps)} steps all time</span></div>
-        <div class="tile"><small>CO₂ saved vs driving</small><b>${stats.co2SavedKg.toFixed(1)} kg</b>
-          <span>if you'd driven instead</span></div>
+        <div class="tile"><small>${icons.leaf}CO₂ saved</small><b>${stats.co2SavedKg.toFixed(1)} kg</b>
+          <span>vs driving the same distance</span></div>
       </div>
 
       <section class="chart-card" id="week">

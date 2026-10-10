@@ -15,6 +15,9 @@ export async function openProfile() {
         <h2>${escapeHtml(user.username)}</h2>
         <button class="icon-btn" data-close aria-label="Close">X</button>
       </div>
+      <p class="traits">${escapeHtml([
+        `Feeling ${buddy.mood}`, ...(buddy.personality ? [...buddy.personality.traits, buddy.personality.quirk] : []),
+      ].join(' · '))}</p>
       <div class="record">
         <div class="stat is-win"><small>Wins</small><b>${record.wins}</b></div>
         <div class="stat is-loss"><small>Losses</small><b>${record.losses}</b></div>

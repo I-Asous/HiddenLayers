@@ -15,13 +15,15 @@ export function mount(el) {
     const { points } = app.state.user;
     return `<div class="grid">${items.map((item) => `
       <article class="item ${item.owned ? 'is-owned' : ''}">
-        <div class="item-art">${cosmeticIcon(item)}</div>
+        <div class="item-art">${cosmeticIcon(item)}${item.owned
+          ? '<span class="stamp">Owned</span>'
+          : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
         <b>${escapeHtml(item.name)}</b>
         ${item.owned
-          ? '<span class="owned">Owned</span>'
+          ? '<span class="owned">In your wardrobe</span>'
           : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
               data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
-              ${pointIcon}${fmt(item.price)} · Buy</button>`}
+              ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
       </article>`).join('')}</div>`;
   }
 
@@ -53,7 +55,7 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <h1>${view === 'store' ? 'Store' : 'Wardrobe'}</h1>
-        <div class="balance">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+        <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
       </header>
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
