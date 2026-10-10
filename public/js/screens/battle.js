@@ -226,6 +226,13 @@ const RESULT = {
   draw: { title: 'It\'s a draw!', detail: 'So evenly matched.' },
 };
 
+// Shown in the aftermath when the buddy's voice line can't be fetched.
+const FALLBACK_LINES = {
+  win: 'We did it! All those walks paid off!',
+  loss: 'We\'ll get them next time. Let\'s train!',
+  draw: 'So close! One more walk and we win.',
+};
+
 /** Replays the server's turn-by-turn log. Resolves when the player closes the result. */
 function playBattle(battle) {
   return new Promise((resolve) => {
@@ -295,15 +302,35 @@ function playBattle(battle) {
         fighters[battle.outcome === 'win' ? 'a' : 'b'].classList.add('is-winner');
         fighters[battle.outcome === 'win' ? 'b' : 'a'].classList.add('is-loser');
       }
-      const button = overlay.querySelector('#skip');
-      button.textContent = 'Done';
-      button.className = 'btn btn-primary btn-block';
-      button.onclick = () => {
+      overlay.querySelector('#skip').remove();
+      // Ask for the buddy's line now so it's ready by the time the aftermath shows.
+      const line = buddySay(battle.outcome);
+      pause(1400).then(() => showAftermath(line));
+    }
+
+    // The after-battle screen: your buddy, reacting, with what it has to say.
+    function showAftermath(line) {
+      const result = RESULT[battle.outcome];
+      const card = overlay.querySelector('.arena-card');
+      card.classList.add('aftermath');
+      card.setAttribute('aria-label', 'Battle result');
+      card.innerHTML = `
+        <h2 class="aftermath-title is-${battle.outcome}">${result.title}</h2>
+        <p class="aftermath-detail">${result.detail} · ${battle.totals.a} vs ${battle.totals.b} damage</p>
+        <div class="bubble aftermath-bubble is-thinking" aria-live="polite"><span class="dots">...</span></div>
+        <div class="aftermath-buddy is-${battle.outcome}">${buddySvg(battle.challenger, { background: false })}</div>
+        <button class="btn btn-primary btn-block" id="done">Done</button>`;
+      card.querySelector('#done').onclick = () => {
         overlay.remove();
         resolve();
       };
       if (battle.outcome === 'win') confetti();
-      buddySay(battle.outcome).then((text) => app.say(text));
+      line.then((text) => {
+        const bubble = card.querySelector('.aftermath-bubble');
+        bubble.classList.remove('is-thinking');
+        bubble.textContent = text || FALLBACK_LINES[battle.outcome];
+        if (text) app.say(text);
+      });
     }
 
     overlay.querySelector('#skip').onclick = () => {

@@ -339,6 +339,22 @@ input::placeholder { color: var(--panel-dim); }
   text-align: center;
 }
 
+/* On home the bubble floats over the scene, so the page doesn't jump when the buddy talks. */
+.home-bubble {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  animation: bubble-in 0.25s steps(3);
+}
+.home-bubble[hidden] { display: none; }
+
+@keyframes bubble-in {
+  from { transform: translateX(-50%) scale(0.8); opacity: 0; }
+}
+
 .bubble::after {
   content: '';
   position: absolute;
@@ -362,6 +378,7 @@ input::placeholder { color: var(--panel-dim); }
 
 .nameplate b { font-family: var(--pixel); font-size: 12px; color: var(--yellow); }
 .nameplate span { font-size: 18px; color: var(--ink); }
+.traits { margin: 0; padding: 0 12px 10px; background: var(--panel); font-size: 16px; color: var(--muted); }
 .evolve-text { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 19px; color: var(--muted); }
 .evolve .bar i { background: repeating-linear-gradient(90deg, var(--cyan) 0 8px, var(--blue) 8px 10px); }
 .upgrades { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
@@ -692,6 +709,30 @@ input::placeholder { color: var(--panel-dim); }
 .arena-result h2.is-loss { color: var(--orange); }
 .arena-result h2.is-draw { color: var(--yellow); }
 .arena-result p { color: var(--muted); }
+
+/* After the battle: the buddy reacts and says its line. */
+.arena-card.aftermath { animation: pop-in 0.3s steps(3); }
+.aftermath-title { font-size: 22px; }
+.aftermath-title.is-win { color: var(--lime); }
+.aftermath-title.is-loss { color: var(--orange); }
+.aftermath-title.is-draw { color: var(--yellow); }
+.aftermath-detail { color: var(--muted); }
+.aftermath-bubble { min-height: 44px; display: grid; place-items: center; animation: pop-in 0.25s steps(3) 0.2s backwards; }
+.aftermath-bubble.is-thinking .dots { animation: blink 0.6s steps(1) infinite; }
+.aftermath-buddy { width: 60%; margin: 6px auto 0; background: var(--slate); border: 2px solid var(--dark); }
+.aftermath-buddy.is-win .buddy-body { animation: hop 0.4s steps(1) infinite; }
+.aftermath-buddy.is-loss .buddy-body { animation: slump 1.6s steps(1) infinite; }
+.aftermath-buddy.is-draw .buddy-body { animation: bounce 0.9s steps(1) infinite; }
+
+@keyframes pop-in {
+  from { transform: scale(0.8); opacity: 0; }
+  50% { transform: scale(1.04); }
+}
+
+@keyframes slump {
+  0%, 100% { transform: translateY(2px); }
+  50% { transform: translateY(3px) rotate(-3deg); }
+}
 
 /* ---------- Evolution ---------- */
 

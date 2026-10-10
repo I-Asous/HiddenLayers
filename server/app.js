@@ -3,10 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buddyLine, isBuddyEvent, speak } from './ai.js';
+import {
+  BUDDY_EVENTS, MOOD_STYLES, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
+  waitForSpeech,
+} from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, pointsEarned, resolveBattle, stageForLevel, upgradeCosts,
+  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor,
+  upgradeCosts,
 } from './game.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -35,8 +39,97 @@ export function createApp({ dbFile, dataDir }) {
   const db = openDb(dbFile);
   const ttsDir = path.join(dataDir, 'tts');
 
+  // A personality whose voice was removed from VOICES gets regenerated on next talk.
+  for (const { user_id, personality } of db.prepare('SELECT user_id, personality FROM buddies WHERE personality IS NOT NULL').all()) {
+    if (!(JSON.parse(personality).voice in VOICES)) {
+      db.prepare('UPDATE buddies SET personality = NULL WHERE user_id = ?').run(user_id);
+      db.prepare('DELETE FROM ready_lines WHERE user_id = ?').run(user_id);
+      db.prepare('DELETE FROM buddy_memory WHERE user_id = ?').run(user_id);
+    }
+  }
+
   const getBuddy = (userId) => db.prepare('SELECT * FROM buddies WHERE user_id = ?').get(userId);
   const getUser = (userId) => db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+
+  // Each buddy's personality is generated once and kept. One generation per
+  // user at a time, so a login and a quick tap on Talk share a Gemini call.
+  const personalityInFlight = new Map();
+  function ensurePersonality(userId) {
+    const buddy = getBuddy(userId);
+    if (buddy.personality) return Promise.resolve();
+    if (!personalityInFlight.has(userId)) {
+      personalityInFlight.set(userId, generatePersonality(buddy).then((personality) => {
+        db.prepare('UPDATE buddies SET personality = ? WHERE user_id = ? AND personality IS NULL')
+          .run(JSON.stringify(personality), userId);
+      }).finally(() => personalityInFlight.delete(userId)));
+    }
+    return personalityInFlight.get(userId);
+  }
+
+  // The last 7 days of steps (oldest first), the goal, and the buddy's mood.
+  function moodContext(userId, tz) {
+    const user = getUser(userId);
+    const byDay = stepsByDay(db, userId, tz);
+    const today = localDay(Date.now(), tz);
+    const week = [];
+    for (let day = today - 6; day <= today; day++) {
+      week.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
+    }
+    const battles = db.prepare(`
+      SELECT winner_id, created_at FROM battles
+      WHERE challenger_id = :id OR opponent_id = :id
+      ORDER BY created_at DESC LIMIT 2
+    `).all({ id: userId });
+    const mood = moodFor({
+      week: week.map((d) => d.steps), goal: user.daily_goal,
+      streak: streakFor(byDay, today, user.daily_goal),
+      lastBattles: battles.map(({ winner_id }) => (winner_id === null ? 'draw' : winner_id === userId ? 'win' : 'loss')),
+      msSinceLastBattle: battles.length ? Date.now() - battles[0].created_at : Infinity,
+    });
+    // When the mood wears off by itself, so the app can refresh right then.
+    const moodUntil = mood === 'upset' ? battles[0].created_at + UPSET_MS : null;
+    return { week, goal: user.daily_goal, mood, moodUntil };
+  }
+
+  // The buddy remembers its last few exchanges, so it can build on them and
+  // doesn't repeat itself.
+  const MEMORY_SIZE = 8;
+  const recall = (userId) => db
+    .prepare('SELECT situation, reply FROM buddy_memory WHERE user_id = ? ORDER BY id DESC LIMIT ?')
+    .all(userId, MEMORY_SIZE).reverse();
+  function remember(userId, situation, reply) {
+    db.prepare('INSERT INTO buddy_memory (user_id, situation, reply) VALUES (?, ?, ?)').run(userId, situation, reply);
+    db.prepare(`
+      DELETE FROM buddy_memory WHERE user_id = ? AND id NOT IN
+        (SELECT id FROM buddy_memory WHERE user_id = ? ORDER BY id DESC LIMIT ?)
+    `).run(userId, userId, MEMORY_SIZE);
+  }
+
+  // Event lines are written and voiced ahead of time so level-ups and battles
+  // answer instantly. They live in the DB so a restart doesn't spend credits again.
+  const preparing = new Set();
+  function prepareLines(userId, tz) {
+    if (!process.env.GEMINI_API_KEY) return; // built-in lines are instant anyway
+    for (const event of BUDDY_EVENTS) {
+      const key = `${userId}:${event}`;
+      if (preparing.has(key) || db.prepare('SELECT 1 FROM ready_lines WHERE user_id = ? AND event = ?').get(userId, event)) {
+        continue;
+      }
+      preparing.add(key);
+      (async () => {
+        const buddy = getBuddy(userId);
+        buddy.personality = JSON.parse(buddy.personality);
+        const { week, goal, mood } = moodContext(userId, tz);
+        const line = await buddyLine({ event, buddy, week, goal, mood, memory: recall(userId) });
+        if (line.source !== 'gemini') return;
+        db.prepare('INSERT OR REPLACE INTO ready_lines (user_id, event, text, speech, mood) VALUES (?, ?, ?, ?, ?)')
+          .run(userId, event, line.text, line.speech, mood);
+        startSpeech(line.speech, ttsDir, buddy.personality.voice, {
+          background: true, stability: MOOD_STYLES[mood].stability,
+        });
+      })().catch((err) => console.error('[ai]', err.message)).finally(() => preparing.delete(key));
+    }
+  }
 
   function record(userId) {
     const row = db.prepare(`
@@ -53,12 +146,16 @@ export function createApp({ dbFile, dataDir }) {
     const user = getUser(userId);
     const buddy = getBuddy(userId);
     const today = localDay(Date.now(), tz);
+    const { mood, moodUntil } = moodContext(userId, tz);
     return {
       user: {
         id: user.id, username: user.username, points: user.points,
         totalSteps: user.total_steps, dailyGoal: user.daily_goal,
       },
-      buddy: { ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy) },
+      buddy: {
+        ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
+        personality: traitsOf(buddy), mood, moodUntil,
+      },
       todaySteps: stepsByDay(db, userId, tz).get(today) ?? 0,
       record: record(userId),
     };
@@ -100,6 +197,7 @@ export function createApp({ dbFile, dataDir }) {
           .run(token, user.id, Date.now());
         return user.id;
       });
+      ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
       return { token, ...state(userId, tz) };
     },
 
@@ -358,14 +456,7 @@ export function createApp({ dbFile, dataDir }) {
       for (let day = today - 29; day <= today; day++) {
         days.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
       }
-      // Today only counts toward the streak once the goal is hit; until then
-      // yesterday's streak is still alive.
-      let streak = 0;
-      let day = (byDay.get(today) ?? 0) >= user.daily_goal ? today : today - 1;
-      while ((byDay.get(day) ?? 0) >= user.daily_goal) {
-        streak++;
-        day--;
-      }
+      const streak = streakFor(byDay, today, user.daily_goal);
       let best = null;
       for (const [d, steps] of byDay) {
         if (!best || steps > best.steps) best = { date: dayLabel(d), steps };
@@ -386,17 +477,22 @@ export function createApp({ dbFile, dataDir }) {
     'POST /api/talk': async ({ userId, body, tz }) => {
       const event = body.event ?? 'chat';
       if (!isBuddyEvent(event)) throw new HttpError(400, 'Unknown event');
-      const user = getUser(userId);
-      const byDay = stepsByDay(db, userId, tz);
-      const today = localDay(Date.now(), tz);
-      const week = [];
-      for (let day = today - 6; day <= today; day++) {
-        week.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
-      }
-      const { text, source } = await buddyLine({
-        event, buddy: getBuddy(userId), week, goal: user.daily_goal,
-      });
-      const audio = await speak(text, ttsDir);
+      const { week, goal, mood } = moodContext(userId, tz);
+      await ensurePersonality(userId);
+      const buddy = getBuddy(userId);
+      buddy.personality = JSON.parse(buddy.personality);
+      // A line written in another mood is stale: drop it and write a fresh one.
+      const taken = event !== 'chat' && db
+        .prepare('DELETE FROM ready_lines WHERE user_id = ? AND event = ? RETURNING text, speech, mood')
+        .get(userId, event);
+      const ready = taken?.mood === mood && taken;
+      const { text, speech, source } = ready
+        ? { ...ready, source: 'gemini' }
+        : await buddyLine({ event, buddy, week, goal, mood, memory: recall(userId) });
+      if (source === 'gemini') remember(userId, situationFor(event, week, goal, mood), speech);
+      prepareLines(userId, tz);
+      // Don't wait for the voice: the text shows now, the audio URL waits for the mp3.
+      const audio = startSpeech(speech, ttsDir, buddy.personality.voice, { stability: MOOD_STYLES[mood].stability });
       return { text, source, audioUrl: audio ? `/api/tts/${audio}` : null };
     },
   };
@@ -446,7 +542,7 @@ export function createApp({ dbFile, dataDir }) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
-      if (url.pathname.startsWith('/api/tts/')) return serveTts(res, ttsDir, url.pathname.slice(9));
+      if (url.pathname.startsWith('/api/tts/')) return await serveTts(res, ttsDir, url.pathname.slice(9));
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       return serveStatic(req, res, url.pathname);
     } catch (err) {
@@ -461,6 +557,13 @@ function publicBuddy(b) {
     name: b.name, species: b.species, level: b.level, attack: b.attack, evasion: b.evasion, stage: b.stage,
     equipped: { hat: b.hat, eyewear: b.eyewear, accessory: b.accessory, background: b.background },
   };
+}
+
+// What the player sees of the personality; the voice and style stay server-side.
+function traitsOf(b) {
+  if (!b.personality) return null;
+  const { traits, quirk } = JSON.parse(b.personality);
+  return { traits, quirk };
 }
 
 function sendJson(res, status, data) {
@@ -482,8 +585,9 @@ async function readJson(req) {
   throw new HttpError(400, 'Invalid JSON');
 }
 
-function serveTts(res, ttsDir, name) {
+async function serveTts(res, ttsDir, name) {
   if (!/^[a-f0-9]{64}\.mp3$/.test(name)) throw new HttpError(404, 'Not found');
+  await waitForSpeech(name);
   const file = path.join(ttsDir, name);
   if (!existsSync(file)) throw new HttpError(404, 'Not found');
   res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'public, max-age=31536000, immutable' });

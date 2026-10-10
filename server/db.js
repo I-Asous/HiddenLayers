@@ -35,7 +35,8 @@ export function openDb(file) {
       hat        TEXT REFERENCES cosmetics(id),
       eyewear    TEXT REFERENCES cosmetics(id),
       accessory  TEXT REFERENCES cosmetics(id),
-      background TEXT REFERENCES cosmetics(id)
+      background TEXT REFERENCES cosmetics(id),
+      personality TEXT -- JSON, filled in on first login or talk
     );
     CREATE TABLE IF NOT EXISTS cosmetics (
       id    TEXT PRIMARY KEY,
@@ -86,10 +87,32 @@ export function openDb(file) {
       PRIMARY KEY (user_id, friend_id),
       CHECK (user_id != friend_id)
     );
+    -- The buddy's recent exchanges, sent to Gemini as the conversation so far.
+    CREATE TABLE IF NOT EXISTS buddy_memory (
+      id        INTEGER PRIMARY KEY,
+      user_id   INTEGER NOT NULL REFERENCES users(id),
+      situation TEXT NOT NULL,
+      reply     TEXT NOT NULL
+    );
+    -- Event lines (level up, battles…) written ahead of time so they play instantly.
+    CREATE TABLE IF NOT EXISTS ready_lines (
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      event   TEXT NOT NULL,
+      text    TEXT NOT NULL,
+      speech  TEXT NOT NULL,
+      mood    TEXT, -- the mood it was written in; stale once the mood changes
+      PRIMARY KEY (user_id, event)
+    );
   `);
   // Databases created before beasts existed have no species column.
   if (!db.prepare('PRAGMA table_info(buddies)').all().some((col) => col.name === 'species')) {
     db.exec("ALTER TABLE buddies ADD COLUMN species TEXT NOT NULL DEFAULT 'dragon'");
+  }
+  if (!db.prepare('PRAGMA table_info(buddies)').all().some((col) => col.name === 'personality')) {
+    db.exec('ALTER TABLE buddies ADD COLUMN personality TEXT');
+  }
+  if (!db.prepare('PRAGMA table_info(ready_lines)').all().some((col) => col.name === 'mood')) {
+    db.exec('ALTER TABLE ready_lines ADD COLUMN mood TEXT');
   }
   seedCosmetics(db);
   seedDemoUsers(db);

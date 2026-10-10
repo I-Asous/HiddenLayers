@@ -1,27 +1,11 @@
 import { api } from '../api.js';
 import { SPECIES, buddySvg, stageName } from '../buddy.js';
-import { buddySay, confetti, escapeHtml, fmt, toast } from '../fx.js';
+import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { openProfile } from './profile.js';
 
 const NEXT_STAGE = { egg: ['baby', 1, 5], baby: ['teen', 5, 10], teen: ['adult', 10, 20] };
-
-function buddyLine() {
-  const { user, buddy } = app.state;
-  if (app.spoken && app.spoken.until > Date.now()) return app.spoken.text;
-  const today = app.todaySteps;
-  if (walk.walking) return 'Left, right, left, right! I can feel us moving!';
-  if (today >= user.dailyGoal) return 'We hit our goal today! You\'re amazing!';
-  if (today === 0) {
-    return new Date().getHours() < 11
-      ? 'Good morning! Shall we go for a walk?'
-      : 'Zzz… I haven\'t stretched my legs all day.';
-  }
-  if (user.points >= buddy.costs.level) return 'I feel ready to grow… tap Level Up!';
-  if (today >= user.dailyGoal / 2) return 'More than halfway to our goal! Keep going!';
-  return 'Every step makes me stronger!';
-}
 
 function upgradeButton(type, label, detail, cost, points) {
   const short = points < cost;
@@ -46,6 +30,7 @@ export function mount(el) {
   function render() {
     const { user, buddy, record } = app.state;
     const today = app.todaySteps;
+    const speaking = app.spoken && app.spoken.until > Date.now();
     const goalPct = Math.min(100, (today / user.dailyGoal) * 100);
     const next = NEXT_STAGE[buddy.stage];
     const nextTitle = next && (SPECIES[buddy.species] ?? SPECIES.dragon).titles[next[0]];
@@ -67,13 +52,16 @@ export function mount(el) {
         <div class="balance" aria-label="${user.points} Stride Points">${pointIcon}<b>${fmt(user.points)}</b></div>
       </header>
 
-      <div class="bubble" aria-live="polite">${escapeHtml(buddyLine())}</div>
       <section class="stage-card">
+        <div class="bubble home-bubble" aria-live="polite" ${speaking ? '' : 'hidden'}>${speaking ? escapeHtml(app.spoken.text) : ''}</div>
         ${buddySvg(buddy, { className: `is-idle ${today === 0 && !walk.walking ? 'is-sleepy' : ''}` })}
         <div class="nameplate">
           <b>${escapeHtml(buddy.name)}</b>
           <span>Lv ${buddy.level} ${stageName(buddy)} · ${fmt(buddy.xp)} XP</span>
         </div>
+        <p class="traits">${escapeHtml([
+          `Feeling ${buddy.mood}`, ...(buddy.personality ? [...buddy.personality.traits, buddy.personality.quirk] : []),
+        ].join(' · '))}</p>
       </section>
 
       ${evolveHtml}
@@ -129,8 +117,13 @@ export function mount(el) {
     button.disabled = true;
     button.classList.add('is-loading');
     const text = await buddySay('chat');
-    if (text) app.say(text);
-    else toast('Your buddy is feeling shy. Try again in a moment.', 'warn');
+    if (text) {
+      app.say(text);
+      // The first talk gives the buddy its personality; fetch it so the traits show.
+      if (!app.state.buddy.personality) app.refresh().catch(() => {});
+    } else {
+      toast('Your buddy is feeling shy. Try again in a moment.', 'warn');
+    }
     // The screen may have re-rendered while waiting; the old button is gone then.
     button.disabled = false;
     button.classList.remove('is-loading');
@@ -144,11 +137,30 @@ export function mount(el) {
     if (event.target.closest('#profile-btn')) return openProfile();
   };
   el.addEventListener('click', onClick);
-  // Re-render when a spoken line expires so the bubble returns to normal.
+  // The bubble goes away shortly after the buddy finishes talking.
+  let quietTimer;
+  const onVoiceEnd = () => {
+    clearTimeout(quietTimer);
+    const line = app.spoken;
+    quietTimer = setTimeout(() => {
+      if (app.spoken !== line) return; // a newer line started meanwhile
+      app.spoken = null;
+      render();
+    }, 1200);
+  };
+  voice.addEventListener('end', onVoiceEnd);
+  // Re-render when a spoken line expires so the bubble goes away, and
+  // fetch the new mood once a short-lived one (upset) wears off.
+  let refreshedFor = null;
   const tick = setInterval(() => {
     if (app.spoken && app.spoken.until <= Date.now()) {
       app.spoken = null;
       render();
+    }
+    const until = app.state?.buddy.moodUntil;
+    if (until && until <= Date.now() && refreshedFor !== until) {
+      refreshedFor = until;
+      app.refresh().catch(() => {});
     }
   }, 1000);
   // Steps arrive a couple of times a second during a walk. Only the step card
@@ -173,7 +185,9 @@ export function mount(el) {
     destroy() {
       el.removeEventListener('click', onClick);
       walk.removeEventListener('change', onWalk);
+      voice.removeEventListener('end', onVoiceEnd);
       clearInterval(tick);
+      clearTimeout(quietTimer);
     },
   };
 }

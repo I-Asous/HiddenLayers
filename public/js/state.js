@@ -33,7 +33,9 @@ class App extends EventTarget {
 
   say(text) {
     if (!text) return;
-    this.spoken = { text, until: Date.now() + 12_000 };
+    // Cleared when the voice finishes (see home); the time limit is a backstop
+    // for when no voice plays. The ElevenLabs audio can lag the text by seconds.
+    this.spoken = { text, until: Date.now() + 20_000 };
     this.dispatchEvent(new Event('change'));
   }
 }
