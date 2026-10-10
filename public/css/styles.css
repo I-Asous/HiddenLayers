@@ -747,7 +747,11 @@ input::placeholder { color: var(--slate); }
 .map-recenter .px-icon { width: 24px; height: 24px; }
 .map-recenter[hidden] { display: none; }
 
-/* A nearby player's tap area: over their model, feet on their map position, name tag on top. */
+/* Name tags sit in their own layer over the characters, so none is ever covered. */
+.map-tags { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+
+/* A nearby player's tap area: feet on their map position, up past their head,
+   name tag on top (the height is set from how tall they are drawn). */
 .map-player {
   position: absolute;
   display: flex;
@@ -755,6 +759,7 @@ input::placeholder { color: var(--slate); }
   align-items: center;
   width: 56px;
   height: 72px;
+  pointer-events: auto;
   padding: 0;
   border: 0;
   background: none;
@@ -762,6 +767,11 @@ input::placeholder { color: var(--slate); }
   cursor: pointer;
 }
 .map-player span {
+  /* Just above the head, however small the character is drawn. */
+  position: absolute;
+  bottom: calc(var(--head, 48px) + 4px);
+  left: 50%;
+  transform: translateX(-50%);
   padding: 3px 4px 2px;
   background: var(--dark);
   border: 2px solid var(--ink);

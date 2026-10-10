@@ -1008,7 +1008,13 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   const far = await signUp('far_walker');
   const stale = await signUp('stale_walker');
   const stranger = await signUp('stranger');
-  for (const { user } of [near, far, stale]) await call('POST', '/friends', { username: user.username });
+  // A friend request only counts once they accept it.
+  const me = (await call('GET', '/me')).data.user;
+  const befriend = async (other) => {
+    await call('POST', '/friends', { username: other.user.username });
+    await call('POST', '/friends/respond', { userId: me.id, accept: true }, other.token);
+  };
+  for (const other of [near, far, stale]) await befriend(other);
 
   assert.equal((await call('POST', '/location', { lat: 91, lng: 0 })).status, 400);
   assert.equal((await call('POST', '/location', { lat: 'x', lng: 0 })).status, 400);
@@ -1032,7 +1038,7 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   assert.equal(players[0].buddy.name, 'Pal');
 
   // Becoming friends puts the stranger on the map.
-  await call('POST', '/friends', { username: 'stranger' });
+  await befriend(stranger);
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker', 'stranger']);
 
   // Hidden players vanish at once and stay off friends' maps.

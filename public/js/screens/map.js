@@ -14,7 +14,7 @@ import { escapeHtml, fmt, fmtDistance, toast } from '../fx.js';
 import { bearingDeg, distanceM, pathLengthM, pointAlong } from '../geo.js';
 import { gps, markVisibilityChosen, visibilityChosen } from '../gps.js';
 import { icons } from '../icons.js';
-import { prepareCharacter } from '../rig.js';
+import { HEIGHT, prepareCharacter } from '../rig.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { playBattle } from './battle.js';
@@ -31,6 +31,10 @@ const CROSSFADE_S = 0.4;
 const TELEPORT_M = 200;
 const NEARBY_POLL_MS = 10_000;
 const FOCUS_ZOOM = 20;
+// Retro look: characters are full size at street zoom and shrink with the map
+// as it zooms out, down to this fraction so they can still be seen and tapped.
+const STREET_ZOOM = 18;
+const MIN_ZOOMED_OUT_SCALE = 0.3;
 // Seeded demo buddies walk a circle this big, this fast, around their spot.
 const DEMO_CIRCLE_M = 15;
 const DEMO_PACE_MPS = 1.3;
@@ -172,6 +176,7 @@ export function mount(el) {
   el.innerHTML = `
     <div class="map"><div id="map"></div></div>
     <canvas class="map-buddy" id="map-buddy" width="520" height="520" hidden></canvas>
+    <div class="map-tags" id="map-tags"></div>
     <div class="map-empty" id="map-empty" hidden>${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}</div>
     <div class="map-card" aria-live="off">
       <div><small>Distance</small><b id="map-distance"></b></div>
@@ -449,7 +454,7 @@ export function mount(el) {
     const in3d = Boolean(config.googleMapsMapId);
     map = new maps.Map($('map'), {
       center: { lat: shown.lat, lng: shown.lng },
-      zoom: 18,
+      zoom: STREET_ZOOM,
       minZoom: 3, // far enough out to find friends in other cities
       maxZoom: 21,
       ...(in3d
@@ -497,7 +502,8 @@ export function mount(el) {
       shadow.position.y = 0.01;
       stand.add(shadow);
       scene.add(stand);
-      const fig = { scene, stand, turner, stageScale: STAGE_SCALE[stage] ?? 1, character: null, pos, heading: 0 };
+      // headPx: how far above its feet its head is drawn on screen, so its name tag clears it.
+      const fig = { scene, stand, turner, stageScale: STAGE_SCALE[stage] ?? 1, character: null, pos, heading: 0, headPx: 0 };
       placeStand(fig);
       figures.add(fig);
       return fig;
@@ -551,7 +557,9 @@ export function mount(el) {
       return beast.then((buffer) => new GLTFLoader().parseAsync(buffer, ''));
     };
 
-    // A nearby player: their 3D buddy on the map, with a tappable name tag at its feet.
+    // A nearby player: their 3D buddy on the map, under a tappable name tag.
+    // The tags live in their own layer over the characters' canvas so a
+    // character never covers one.
     PlayerMarker = class extends maps.OverlayView {
       constructor(player) {
         super();
@@ -562,7 +570,6 @@ export function mount(el) {
         this.button = document.createElement('button');
         this.button.className = 'map-player';
         this.button.addEventListener('click', () => openPlayer(this.player.userId));
-        maps.OverlayView.preventMapHitsAndGesturesFrom(this.button);
         this.update(player);
         this.setMap(map);
       }
@@ -575,15 +582,18 @@ export function mount(el) {
       }
 
       onAdd() {
-        this.getPanes().overlayMouseTarget.append(this.button);
+        $('map-tags').append(this.button);
       }
 
+      // The button runs from the character's feet up past its head, tag on top.
       draw() {
         const { lat, lng } = this.figure.pos;
-        const point = this.getProjection()?.fromLatLngToDivPixel(new maps.LatLng(lat, lng));
+        const point = this.getProjection()?.fromLatLngToContainerPixel(new maps.LatLng(lat, lng));
         if (!point) return;
         this.button.style.left = `${point.x}px`;
         this.button.style.top = `${point.y}px`;
+        this.button.style.height = `${Math.max(44, this.figure.headPx + 24)}px`;
+        this.button.style.setProperty('--head', `${this.figure.headPx}px`);
       }
 
       onRemove() {
@@ -625,10 +635,16 @@ export function mount(el) {
       };
       overlay.onDraw = ({ transformer }) => {
         if (!renderer) return;
+        const screenHeight = $('map').clientHeight;
         for (const fig of figures) {
           const matrix = transformer.fromLatLngAltitude({ lat: fig.pos.lat, lng: fig.pos.lng, altitude: 0 });
           camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
           renderer.render(fig.scene, camera);
+          // Where the top of the head lands: the matrix's last column is the point itself in clip space.
+          const head = transformer.fromLatLngAltitude({
+            lat: fig.pos.lat, lng: fig.pos.lng, altitude: HEIGHT * MODEL_SCALE * fig.stageScale,
+          });
+          fig.headPx = ((head[13] / head[15] - matrix[13] / matrix[15]) / 2) * screenHeight;
         }
         renderer.resetState(); // hand the GL state back to the map as we found it
       };
@@ -657,6 +673,7 @@ export function mount(el) {
       const raycaster = new THREE.Raycaster();
       const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
       const ndc = new THREE.Vector2();
+      const head = new THREE.Vector3();
       // Only here for its projection: map position -> screen pixel.
       const projector = Object.assign(new maps.OverlayView(), { onAdd() {}, draw() {}, onRemove() {} });
       projector.setMap(map);
@@ -679,11 +696,16 @@ export function mount(el) {
           camera.updateProjectionMatrix();
         }
         renderer.clear();
+        const zoomScale = Math.max(MIN_ZOOMED_OUT_SCALE, Math.min(1, 2 ** (map.getZoom() - STREET_ZOOM)));
         for (const fig of figures) {
+          fig.stand.scale.setScalar(fig.stageScale * zoomScale);
           const pixel = projection.fromLatLngToContainerPixel(new maps.LatLng(fig.pos.lat, fig.pos.lng));
           ndc.set((pixel.x / width) * 2 - 1, 1 - (pixel.y / height) * 2);
           raycaster.setFromCamera(ndc, camera);
-          if (raycaster.ray.intersectPlane(ground, fig.stand.position)) renderer.render(fig.scene, camera);
+          if (!raycaster.ray.intersectPlane(ground, fig.stand.position)) continue;
+          renderer.render(fig.scene, camera);
+          head.copy(fig.stand.position).setY(HEIGHT * fig.stageScale * zoomScale).project(camera);
+          fig.headPx = pixel.y - ((1 - head.y) / 2) * height;
         }
       };
     }
