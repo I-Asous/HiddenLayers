@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { fmt, toast } from '../fx.js';
+import { fmt, fmtDistance, toast } from '../fx.js';
 import { icons } from '../icons.js';
 
 const W = 340;
@@ -103,7 +103,7 @@ export function mount(el) {
           <span>${stats.streak === 1 ? 'day' : 'days'} hitting your goal</span></div>
         <div class="tile"><small>${icons.trophy}Best day</small><b>${stats.bestDay ? fmt(stats.bestDay.steps) : '–'}</b>
           <span>${stats.bestDay ? shortDate.format(parse(stats.bestDay.date)) : 'No walks yet'}</span></div>
-        <div class="tile"><small>${icons.boot}Total distance</small><b>${stats.distanceKm.toFixed(1)} km</b>
+        <div class="tile"><small>${icons.boot}Total distance</small><b>${fmtDistance(stats.distanceKm * 1000, { decimals: 1, small: false })}</b>
           <span>${fmt(stats.totalSteps)} steps all time</span></div>
         <div class="tile"><small>${icons.leaf}CO₂ saved</small><b>${stats.co2SavedKg.toFixed(1)} kg</b>
           <span>vs driving the same distance</span></div>

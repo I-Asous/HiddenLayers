@@ -1050,3 +1050,7 @@ input::placeholder { color: var(--slate); }
   .evo-from { display: none; }
   .evo-to { opacity: 1; }
 }
+
+/* Profile: a setting that applies on tap, outside the Save form. */
+.setting { display: grid; gap: 6px; margin-bottom: var(--s3); }
+.setting-label { color: var(--cyan); text-align: left; }
