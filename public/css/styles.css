@@ -51,7 +51,7 @@ h2 { font-family: var(--pixel); font-size: 13px; line-height: 1.5; }
 h3 { font-family: var(--pixel); font-size: 11px; margin: 18px 0 10px; color: var(--cyan); text-transform: uppercase; }
 b { font-weight: 400; }
 small { font-size: 18px; color: var(--muted); }
-button, input { font: inherit; color: inherit; border-radius: 0; }
+button, input, select { font: inherit; color: inherit; border-radius: 0; }
 button { cursor: pointer; touch-action: manipulation; }
 a { color: inherit; text-decoration: none; }
 :focus-visible { outline: 3px solid var(--yellow); outline-offset: 2px; }
@@ -314,9 +314,9 @@ a { color: inherit; text-decoration: none; }
 .login > p { color: var(--muted); }
 .login form, .sheet form { width: 100%; display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
 label, legend { display: block; text-align: left; color: var(--cyan); }
-label input:not([type='radio']) { display: block; margin-top: 6px; }
+label input:not([type='radio']), label select { display: block; margin-top: 6px; }
 
-input {
+input, select {
   min-height: 52px;
   padding: 8px 14px;
   background: var(--shadow);

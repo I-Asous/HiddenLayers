@@ -4,7 +4,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  BUDDY_EVENTS, MOOD_STYLES, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
+  BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
   waitForSpeech,
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
@@ -182,12 +182,15 @@ export async function createApp({ dbFile, dataDir }) {
       }
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
       const species = SPECIES.includes(body.species) ? body.species : SPECIES[0];
+      // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
+      const preset = presetById(body.personality);
       const token = randomBytes(24).toString('hex');
       const userId = await transaction(db, async (tx) => {
         let user = await tx.get('SELECT id FROM users WHERE username = ?', [username]);
         if (!user) {
           const { id } = await tx.run('INSERT INTO users (username, created_at) VALUES (?, ?) RETURNING id', [username, Date.now()]);
-          await tx.run('INSERT INTO buddies (user_id, name, species) VALUES (?, ?, ?)', [id, buddyName, species]);
+          await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
+            [id, buddyName, species, preset ? JSON.stringify(preset) : null]);
           user = { id };
         }
         await tx.run('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)', [token, user.id, Date.now()]);
@@ -203,6 +206,11 @@ export async function createApp({ dbFile, dataDir }) {
     },
 
     'GET /api/me': ({ userId, tz }) => state(userId, tz),
+
+    // Public: the sign-up screen lists these before there is a session.
+    'GET /api/personalities': () => ({
+      personalities: PERSONALITY_PRESETS.map(({ id, name, traits, quirk }) => ({ id, name, traits, quirk })),
+    }),
 
     // The Google Maps JavaScript API runs in the browser, so its key has to be
     // handed to the page. Restrict the key to this site's URL in Google Cloud.
@@ -223,6 +231,20 @@ export async function createApp({ dbFile, dataDir }) {
         const name = String(body.buddyName).trim().slice(0, 16);
         if (!name) throw new HttpError(400, 'Your buddy needs a name');
         await db.run('UPDATE buddies SET name = ? WHERE user_id = ?', [name, userId]);
+      }
+      // A preset id, or 'surprise' for a fresh invented one.
+      if (body.personality !== undefined) {
+        const preset = presetById(body.personality);
+        if (!preset && body.personality !== 'surprise') throw new HttpError(400, 'Unknown personality');
+        const current = (await getBuddy(userId)).personality;
+        if (!preset || JSON.parse(current ?? '{}').id !== preset.id) {
+          await db.run('UPDATE buddies SET personality = ? WHERE user_id = ?', [preset ? JSON.stringify(preset) : null, userId]);
+          // Lines and memories in the old voice would sound out of character.
+          await db.run('DELETE FROM ready_lines WHERE user_id = ?', [userId]);
+          await db.run('DELETE FROM buddy_memory WHERE user_id = ?', [userId]);
+          await ensurePersonality(userId);
+          prepareLines(userId, tz);
+        }
       }
       return state(userId, tz);
     },
@@ -520,7 +542,7 @@ export async function createApp({ dbFile, dataDir }) {
     if (!route) throw new HttpError(404, 'Not found');
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
     let userId = null;
-    if (url.pathname !== '/api/login') {
+    if (url.pathname !== '/api/login' && url.pathname !== '/api/personalities') {
       const auth = token && await db.get('SELECT user_id FROM auth_tokens WHERE token = ?', [token]);
       if (!auth) throw new HttpError(401, 'Please sign in');
       userId = auth.user_id;
@@ -556,9 +578,11 @@ function publicBuddy(b) {
 // What the player sees of the personality; the voice and style stay server-side.
 function traitsOf(b) {
   if (!b.personality) return null;
-  const { traits, quirk } = JSON.parse(b.personality);
-  return { traits, quirk };
+  const { id, traits, quirk } = JSON.parse(b.personality);
+  return { id: id ?? null, traits, quirk };
 }
+
+const presetById = (id) => PERSONALITY_PRESETS.find((p) => p.id === id) ?? null;
 
 function sendJson(res, status, data) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });

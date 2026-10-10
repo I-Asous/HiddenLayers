@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 // ElevenLabs premade voices a personality can pick from. The descriptions are
-// what Gemini reads when it chooses one.
+// what Gemini reads when it chooses one. neverTags are audio tags that would
+// sound out of character in that voice; they're forbidden and stripped.
 export const VOICES = {
   bubbly: { id: 'Nggzl2QAXh3OijoXD116', desc: 'bright, playful, bubbly' },
   australian: { id: 'fjgAVa6FpNYGo4UpjqML', desc: 'cheerful, friendly, Australian' },
@@ -15,19 +16,20 @@ export const VOICES = {
   energetic: { id: 'WtA85syCrJwasGeHGH2p', desc: 'loud, excitable, energetic' },
   posh: { id: 'nDJIICjR9zfJExIFeSCN', desc: 'warm, proper, a little posh' },
   gravelly: { id: 'wo6udizrrtpIxWGp2qJk', desc: 'husky, gravelly, grumpy' },
-  military: { id: 'pqHfZKP75CvOlQylNhV4', desc: 'stern, commanding, military' },
+  military: { id: 'DGzg6RaUqxGRTHSBjfgF', desc: 'stern, commanding, military', neverTags: ['giggles'] },
 };
 
-// Used when there is no Gemini key or Gemini fails.
+// What players pick from, and what "Surprise me" falls back to when there is
+// no Gemini key or Gemini fails.
 export const PERSONALITY_PRESETS = [
-  { traits: ['Bubbly', 'Curious', 'Clumsy'], quirk: 'Loves snacks', style: 'talks fast and giggles a lot', voice: 'bubbly' },
-  { traits: ['Dramatic', 'Sarcastic', 'Vain'], quirk: 'Thinks it is royalty', style: 'speaks like a theatrical diva', voice: 'posh' },
-  { traits: ['Grumpy', 'Loyal', 'Lazy'], quirk: 'Hates mornings', style: 'grumbles, but secretly cares', voice: 'gravelly' },
-  { traits: ['Hyper', 'Competitive', 'Brave'], quirk: 'Counts every step out loud', style: 'shouts like a sports coach', voice: 'energetic' },
-  { traits: ['Calm', 'Kind', 'Dreamy'], quirk: 'Collects pretty leaves', style: 'speaks softly, like a bedtime story', voice: 'calm' },
-  { traits: ['Wise', 'Patient', 'Nosy'], quirk: 'Has a proverb for everything', style: 'talks like an ancient sage', voice: 'grampa' },
-  { traits: ['Sunny', 'Adventurous', 'Laid-back'], quirk: 'Calls everyone mate', style: 'chats like a friendly surfer', voice: 'australian' },
-  { traits: ['Disciplined', 'Bold', 'Strict'], quirk: 'Salutes every tree', style: 'barks orders like a drill sergeant', voice: 'military' },
+  { id: 'giggler', name: 'Giggler', traits: ['Bubbly', 'Curious', 'Clumsy'], quirk: 'Loves snacks', style: 'talks fast and giggles a lot', voice: 'bubbly' },
+  { id: 'diva', name: 'Diva', traits: ['Dramatic', 'Sarcastic', 'Vain'], quirk: 'Thinks it is royalty', style: 'speaks like a theatrical diva', voice: 'posh' },
+  { id: 'grump', name: 'Grump', traits: ['Grumpy', 'Loyal', 'Lazy'], quirk: 'Hates mornings', style: 'grumbles, but secretly cares', voice: 'gravelly' },
+  { id: 'coach', name: 'Coach', traits: ['Hyper', 'Competitive', 'Brave'], quirk: 'Counts every step out loud', style: 'shouts like a sports coach', voice: 'energetic' },
+  { id: 'dreamer', name: 'Dreamer', traits: ['Calm', 'Kind', 'Dreamy'], quirk: 'Collects pretty leaves', style: 'speaks softly, like a bedtime story', voice: 'calm' },
+  { id: 'sage', name: 'Sage', traits: ['Wise', 'Patient', 'Nosy'], quirk: 'Has a proverb for everything', style: 'talks like an ancient sage', voice: 'grampa' },
+  { id: 'surfer', name: 'Surfer', traits: ['Sunny', 'Adventurous', 'Laid-back'], quirk: 'Calls everyone mate', style: 'chats like a friendly surfer', voice: 'australian' },
+  { id: 'sergeant', name: 'Sergeant', traits: ['Disciplined', 'Bold', 'Strict'], quirk: 'Salutes every tree', style: 'barks orders like a drill sergeant', voice: 'military' },
 ];
 
 const EVENT_PROMPTS = {
@@ -91,19 +93,36 @@ async function gemini(system, contents, generationConfig) {
   return text;
 }
 
+const AUDIO_TAGS = ['giggles', 'laughs', 'sighs', 'whispers', 'excited', 'sarcastic', 'gasps', 'groans', 'yawns'];
+const neverTagsOf = (buddy) => VOICES[buddy.personality.voice]?.neverTags ?? [];
+
 function systemPrompt(buddy) {
   const p = buddy.personality;
+  const never = neverTagsOf(buddy);
+  const tags = AUDIO_TAGS.filter((tag) => !never.includes(tag)).map((tag) => `[${tag}]`).join(', ');
   return `You are ${buddy.name}, a small ${buddy.species} at the "${buddy.stage}" stage of growing up, ` +
     'the virtual pet of someone who walks to make you grow. ' +
     `Your personality: ${p.traits.join(', ')}. Speaking style: ${p.style}. ` +
     `Quirk: ${p.quirk}. The quirk is a background detail: bring it up only rarely, never two lines in a row. ` +
     'Each message is a new moment in one ongoing life together. Never repeat a line, joke or topic you already used; ' +
     'react to what is happening now. ' +
-    'Reply with ONE short sentence of at most 12 words, always in character. ' +
+    'Reply with ONE short line of at most 12 words, always in character. ' +
     'Keep all your personality and energy: short means punchy, not bland. ' +
+    'Sound like a real creature blurting something out, not an assistant or a motivational poster. ' +
+    'Fragments are fine. Use casual words, slang and fillers (like "ugh", "okay so", "honestly") ' +
+    'only when your speaking style would, and not in every line. ' +
+    'Don\'t open with stock praise like "Great job!" or "Wow!", and don\'t sum things up. ' +
+    'Never use words like delve, testament, tapestry, journey, crucial, foster, ' +
+    'or phrases like "keep up the great work" or "you\'ve got this". ' +
     'Your words are spoken aloud by a voice actor. Never use emojis, asterisks, action text like *giggles*, or markdown. ' +
-    'To show how you sound, you may add up to 2 audio tags in square brackets, e.g. [giggles], [laughs], [sighs], ' +
-    '[whispers], [excited], [sarcastic], [gasps], [groans], [yawns]. Put each tag right before the words it affects.';
+    `To show how you sound, you may add up to 2 audio tags in square brackets, e.g. ${tags}. ` +
+    'Put each tag right before the words it affects.' +
+    (never.length ? ` Never use ${never.map((tag) => `[${tag}]`).join(' or ')}: it doesn't fit you, whatever your mood.` : '');
+}
+
+// Gemini can still slip in a tag the buddy's voice must never make.
+export function dropTags(text, never) {
+  return never.reduce((t, tag) => t.replace(new RegExp(`\\[${tag}\\]`, 'gi'), ' '), text).replace(/\s+/g, ' ').trim();
 }
 
 // Gemini doesn't always follow the rules above. cleanLine keeps the audio tags
@@ -146,7 +165,7 @@ export async function buddyLine({ event, buddy, week, goal, mood, memory = [] })
   if (process.env.GEMINI_API_KEY) {
     try {
       const situation = situationFor(event, week, goal, mood);
-      const speech = cleanLine(await geminiLine(situation, buddy, memory));
+      const speech = dropTags(cleanLine(await geminiLine(situation, buddy, memory)), neverTagsOf(buddy));
       // A reply that was only "*giggles*" or "[laughs]" has nothing left to show.
       if (!stripTags(speech)) throw new Error('Gemini line was empty after clean-up');
       return { text: stripTags(speech), speech, situation, source: 'gemini' };
