@@ -45,7 +45,7 @@ export function mount(el) {
     <p class="status" id="walk-status" aria-live="polite"></p>
 
     <button class="btn btn-block btn-xl" id="walk-toggle"></button>
-    ${app.demo ? '<button class="btn btn-demo btn-block" id="demo-add">DEMO: +1,000 steps</button>' : ''}
+    ${app.demo ? '<button class="btn btn-demo btn-block" id="demo-add">DEMO: +100,000 steps (Max)</button>' : ''}
 
     <p class="hint">Keep StepBuddy open with your phone in your hand or pocket. Steps are counted from
       the motion sensor and saved every 30 seconds.</p>`;
@@ -119,8 +119,8 @@ export function mount(el) {
   const onClick = async (event) => {
     if (event.target.closest('#walk-toggle')) return toggle();
     if (event.target.closest('#demo-add')) {
-      await walk.addSteps(1000);
-      toast('+1,000 demo steps', 'good');
+      await walk.addSteps(100_000);
+      toast('+100,000 steps added!', 'good');
     }
   };
   el.addEventListener('click', onClick);
