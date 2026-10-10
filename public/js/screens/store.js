@@ -5,10 +5,12 @@ import { app } from '../state.js';
 import { pointIcon } from './home.js';
 
 const SLOT_LABELS = { hat: 'Hats', eyewear: 'Eyewear', accessory: 'Accessories', background: 'Backgrounds' };
+const coinIcon = '<span class="coin-icon" aria-hidden="true">C</span>';
 
 export function mount(el) {
   let view = 'store';
   let items = null;
+  let coinPackages = null;
   let busy = false;
 
   function storeHtml() {
@@ -51,6 +53,22 @@ export function mount(el) {
       ${slots || '<p class="empty">Your wardrobe is empty. Buy something in the Store!</p>'}`;
   }
 
+  function coinsHtml() {
+    return `
+      <section class="coin-hero">
+        <div class="coin-balance">${coinIcon}<span><small>Your coin balance</small><b>${fmt(app.state.user.coins)}</b></span></div>
+        <p>Use coins for special offers and future upgrades. This demo purchase adds coins instantly.</p>
+      </section>
+      <div class="coin-grid">${coinPackages.map((pack) => `
+        <article class="coin-pack ${pack.popular ? 'is-popular' : ''}">
+          ${pack.popular ? '<span class="popular">Best value</span>' : ''}
+          <div class="coin-pack-art">${coinIcon}</div>
+          <b>${escapeHtml(pack.name)}</b>
+          <strong>${fmt(pack.coins)} coins</strong>
+          <button class="btn btn-primary" data-buy-coins="${pack.id}">$${(pack.priceCents / 100).toFixed(2)} · Add coins</button>
+        </article>`).join('')}</div>`;
+  }
+
   function render() {
     el.innerHTML = `
       <header class="topbar">
@@ -59,9 +77,10 @@ export function mount(el) {
       </header>
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
+        <button role="tab" aria-selected="${view === 'coins'}" data-view="coins">Buy Coins</button>
         <button role="tab" aria-selected="${view === 'wardrobe'}" data-view="wardrobe">Wardrobe</button>
       </div>
-      ${items === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : wardrobeHtml()}`;
+      ${items === null || coinPackages === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : view === 'coins' ? coinsHtml() : wardrobeHtml()}`;
   }
 
   async function buy(id) {
@@ -82,6 +101,12 @@ export function mount(el) {
     app.setState(await api('/buddy/equip', { method: 'POST', body: { slot, itemId: wearing ? null : id } }));
   }
 
+  async function buyCoins(id) {
+    const result = await api('/store/buy-coins', { method: 'POST', body: { packageId: id } });
+    app.setState(result);
+    toast(`${fmt(result.purchased.coins)} coins added to your wallet!`, 'good');
+  }
+
   const onClick = async (event) => {
     const tab = event.target.closest('[data-view]');
     if (tab) {
@@ -90,10 +115,12 @@ export function mount(el) {
     }
     const buyBtn = event.target.closest('[data-buy]');
     const equipBtn = event.target.closest('[data-equip]');
-    if ((!buyBtn && !equipBtn) || busy) return;
+    const coinsBtn = event.target.closest('[data-buy-coins]');
+    if ((!buyBtn && !equipBtn && !coinsBtn) || busy) return;
     busy = true;
     try {
       if (buyBtn) await buy(buyBtn.dataset.buy);
+      else if (coinsBtn) await buyCoins(coinsBtn.dataset.buyCoins);
       else await equip(equipBtn.dataset.equip, equipBtn.dataset.slot);
     } catch (err) {
       toast(err.message, 'warn');
@@ -106,6 +133,7 @@ export function mount(el) {
   api('/store')
     .then((data) => {
       items = data.items;
+      coinPackages = data.coinPackages;
       render();
     })
     .catch((err) => toast(err.message, 'warn'));
