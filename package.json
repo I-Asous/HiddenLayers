@@ -1,0 +1,17 @@
+{
+  "name": "stepbuddy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StepBuddy — a virtual pet that grows the more you walk",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "icons": "node scripts/make-icons.js",
+    "model": "node scripts/make-buddy-model.js",
+    "test": "node --test"
+  }
+}
