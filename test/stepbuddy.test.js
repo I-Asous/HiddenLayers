@@ -906,7 +906,9 @@ test('friends: add by username, mutual, no duplicates, removable', async () => {
   assert.equal((await call('POST', '/friends', { username: 'nobody_here' })).status, 404);
   assert.equal((await call('POST', '/friends', { username: 'walker' })).status, 400);
 
+  // Nobody plays the demo accounts, so they accept on the spot.
   const added = await call('POST', '/friends', { username: '@Mira' });
+  assert.equal(added.data.status, 'accepted');
   assert.deepEqual(added.data.friends.map((f) => f.username), ['mira']);
   assert.equal((await call('POST', '/friends', { username: 'mira' })).status, 409);
 
@@ -923,6 +925,53 @@ test('friends: add by username, mutual, no duplicates, removable', async () => {
   const removed = await call('POST', '/friends/remove', { userId: 1 });
   assert.deepEqual(removed.data.friends, []);
   assert.deepEqual((await call('GET', '/friends', null, mira)).data.friends, []);
+});
+
+test('friend requests: sent, then accepted or declined by the other player', async () => {
+  const join = async (username) => {
+    const { data } = await call('POST', '/login', { username }, null);
+    return { auth: data.token, id: data.user.id };
+  };
+  const [asker, picky, eager] = [await join('asker'), await join('picky'), await join('eager')];
+  const friends = async (who) => {
+    const { data } = await call('GET', '/friends', null, who.auth);
+    return Object.fromEntries(['friends', 'incoming', 'outgoing'].map((list) => [list, data[list].map((f) => f.username)]));
+  };
+  const statusOf = async (who, username) => (await call('GET', '/opponents', null, who.auth))
+    .data.opponents.find((o) => o.username === username).friendStatus;
+
+  // Asking doesn't make anyone friends: it waits with the other player.
+  const sent = await call('POST', '/friends', { username: 'picky' }, asker.auth);
+  assert.equal(sent.data.status, 'requested');
+  assert.deepEqual(await friends(asker), { friends: [], incoming: [], outgoing: ['picky'] });
+  assert.deepEqual(await friends(picky), { friends: [], incoming: ['asker'], outgoing: [] });
+  assert.deepEqual([await statusOf(asker, 'picky'), await statusOf(picky, 'asker')], ['requested', 'incoming']);
+  assert.equal((await call('POST', '/friends', { username: 'picky' }, asker.auth)).status, 409);
+  assert.equal((await call('GET', '/leaderboard?scope=friends', null, asker.auth)).data.entries.length, 1);
+
+  // Only the player who was asked can answer, and declining leaves no trace.
+  assert.equal((await call('POST', '/friends/respond', { userId: picky.id, accept: true }, asker.auth)).status, 404);
+  assert.equal((await call('POST', '/friends/respond', { userId: eager.id, accept: true }, picky.auth)).status, 404);
+  const declined = await call('POST', '/friends/respond', { userId: asker.id, accept: false }, picky.auth);
+  assert.deepEqual([declined.data.friends, declined.data.incoming], [[], []]);
+  assert.deepEqual(await friends(asker), { friends: [], incoming: [], outgoing: [] });
+  assert.equal(await statusOf(asker, 'picky'), null);
+
+  // Accepting makes it mutual.
+  await call('POST', '/friends', { username: 'eager' }, asker.auth);
+  const accepted = await call('POST', '/friends/respond', { userId: asker.id, accept: true }, eager.auth);
+  assert.deepEqual(accepted.data.friends.map((f) => f.username), ['asker']);
+  assert.deepEqual(await friends(asker), { friends: ['eager'], incoming: [], outgoing: [] });
+  assert.equal(await statusOf(asker, 'eager'), 'friend');
+  assert.equal((await call('POST', '/friends', { username: 'eager' }, asker.auth)).status, 409);
+
+  // A sent request can be taken back, and asking someone who already asked you accepts theirs.
+  await call('POST', '/friends', { username: 'picky' }, asker.auth);
+  await call('POST', '/friends/remove', { userId: picky.id }, asker.auth);
+  assert.deepEqual((await friends(picky)).incoming, []);
+  await call('POST', '/friends', { username: 'asker' }, picky.auth);
+  assert.equal((await call('POST', '/friends', { username: 'picky' }, asker.auth)).data.status, 'accepted');
+  assert.deepEqual(await friends(picky), { friends: ['asker'], incoming: [], outgoing: [] });
 });
 
 test('leaderboard ranks by steps, wins or level, for friends or everyone', async () => {

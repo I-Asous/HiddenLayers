@@ -7,7 +7,7 @@ import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
   waitForSpeech,
 } from './ai.js';
-import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
+import { DAY_MS, dayLabel, isDemoUser, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
   BATTLE_WIN_BONUS, COIN_PACKAGES, COSMETICS, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse,
   cosmeticCurrency, elementOf, matchup,
@@ -495,42 +495,72 @@ export async function createApp({ dbFile, dataDir }) {
       return { purchased: pack, ...await state(userId, tz) };
     },
 
+    // friendStatus is 'friend', 'requested' (you asked them), 'incoming' (they asked you) or null.
     'GET /api/opponents': async ({ userId }) => ({
       opponents: (await db.all(`
-        SELECT b.*, u.username, f.friend_id IS NOT NULL AS is_friend
+        SELECT b.*, u.username, f.friend_id IS NOT NULL AS is_friend,
+          sent.to_id IS NOT NULL AS is_requested, got.from_id IS NOT NULL AS is_incoming
         FROM buddies b JOIN users u ON u.id = b.user_id
         LEFT JOIN friendships f ON f.user_id = :id AND f.friend_id = b.user_id
+        LEFT JOIN friend_requests sent ON sent.from_id = :id AND sent.to_id = b.user_id
+        LEFT JOIN friend_requests got ON got.to_id = :id AND got.from_id = b.user_id
         WHERE b.user_id != :id ORDER BY b.level DESC, u.username LIMIT 100
       `, { id: userId })).map((row) => ({
         ...publicBuddy(row), userId: row.user_id, username: row.username, isFriend: Boolean(row.is_friend),
+        friendStatus: row.is_friend ? 'friend' : row.is_incoming ? 'incoming' : row.is_requested ? 'requested' : null,
       })),
     }),
 
-    'GET /api/friends': async ({ userId }) => ({ friends: await friendList(userId) }),
+    'GET /api/friends': async ({ userId }) => friendsView(userId),
 
-    // No requests to approve in this demo: adding someone makes you friends both ways.
+    // Asks someone to be friends; they accept or decline. If they had already
+    // asked you, this accepts their request instead. status says which happened.
     'POST /api/friends': async ({ userId, body }) => {
       const username = String(body.username ?? '').trim().replace(/^@/, '');
-      const friend = username && await db.get('SELECT id FROM users WHERE username = ?', [username]);
+      const friend = username && await db.get('SELECT id, username FROM users WHERE username = ?', [username]);
       if (!friend) throw new HttpError(404, `No player called "${username.slice(0, 20)}"`);
       if (friend.id === userId) throw new HttpError(400, 'That\'s you!');
-      const add = 'INSERT INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING';
-      const added = await transaction(db, async (tx) => {
-        const { changes } = await tx.run(add, [userId, friend.id, Date.now()]);
-        await tx.run(add, [friend.id, userId, Date.now()]);
-        return changes === 1;
+      const status = await transaction(db, async (tx) => {
+        const pair = [userId, friend.id];
+        if (await tx.get('SELECT 1 FROM friendships WHERE user_id = ? AND friend_id = ?', pair)) {
+          throw new HttpError(409, 'You\'re already friends');
+        }
+        const theyAsked = await tx.get('SELECT 1 FROM friend_requests WHERE to_id = ? AND from_id = ?', pair);
+        if (theyAsked || isDemoUser(friend.username)) {
+          await befriend(tx, userId, friend.id);
+          return 'accepted';
+        }
+        const { changes } = await tx.run(`
+          INSERT INTO friend_requests (from_id, to_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING
+        `, [...pair, Date.now()]);
+        if (!changes) throw new HttpError(409, 'You\'ve already asked them');
+        return 'requested';
       });
-      if (!added) throw new HttpError(409, 'You\'re already friends');
-      return { friends: await friendList(userId) };
+      return { status, ...await friendsView(userId) };
     },
 
+    // Answers a request from userId: accept makes you friends, otherwise it is just dropped.
+    'POST /api/friends/respond': async ({ userId, body }) => {
+      const fromId = Number(body.userId);
+      await transaction(db, async (tx) => {
+        const asked = Number.isInteger(fromId)
+          && await tx.get('SELECT 1 FROM friend_requests WHERE from_id = ? AND to_id = ?', [fromId, userId]);
+        if (!asked) throw new HttpError(404, 'That request is gone');
+        if (body.accept === true) await befriend(tx, userId, fromId);
+        else await tx.run('DELETE FROM friend_requests WHERE from_id = ? AND to_id = ?', [fromId, userId]);
+      });
+      return friendsView(userId);
+    },
+
+    // Ends a friendship, or takes back a request you sent.
     'POST /api/friends/remove': async ({ userId, body }) => {
       const friendId = Number(body.userId);
       await db.run(`
         DELETE FROM friendships
         WHERE (user_id = :a AND friend_id = :b) OR (user_id = :b AND friend_id = :a)
       `, { a: userId, b: friendId });
-      return { friends: await friendList(userId) };
+      await db.run('DELETE FROM friend_requests WHERE from_id = ? AND to_id = ?', [userId, friendId]);
+      return friendsView(userId);
     },
 
     // ?board=steps|wins|level  ?scope=friends|all
@@ -695,6 +725,30 @@ export async function createApp({ dbFile, dataDir }) {
       return { text, source, audioUrl: audio ? `/api/tts/${audio}` : null };
     },
   };
+
+  // Friendship is one row each way; any request between the two is settled by it.
+  async function befriend(tx, a, b) {
+    const add = 'INSERT INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING';
+    await tx.run(add, [a, b, Date.now()]);
+    await tx.run(add, [b, a, Date.now()]);
+    await tx.run(`
+      DELETE FROM friend_requests WHERE (from_id = :a AND to_id = :b) OR (from_id = :b AND to_id = :a)
+    `, { a, b });
+  }
+
+  // Friends, the requests waiting for this player's answer, and the ones they are waiting on.
+  async function friendsView(userId) {
+    const requests = async (mine, theirs) => (await db.all(`
+      SELECT b.*, u.username FROM friend_requests r
+      JOIN users u ON u.id = r.${theirs} JOIN buddies b ON b.user_id = u.id
+      WHERE r.${mine} = ? ORDER BY r.created_at DESC
+    `, [userId])).map((row) => ({ ...publicBuddy(row), userId: row.user_id, username: row.username }));
+    return {
+      friends: await friendList(userId),
+      incoming: await requests('to_id', 'from_id'),
+      outgoing: await requests('from_id', 'to_id'),
+    };
+  }
 
   async function friendList(userId) {
     return (await db.all(`

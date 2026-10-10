@@ -52,6 +52,8 @@ function buddyRow(o, detail, actions) {
 export function mount(el) {
   let view = 'friends'; // friends | everyone | ranks
   let friends = null;
+  let incoming = []; // requests waiting for this player's answer
+  let outgoing = []; // requests this player is waiting on
   let opponents = null;
   let board = 'steps';
   let scope = 'friends';
@@ -69,19 +71,38 @@ export function mount(el) {
         </div>
       </form>`;
     if (friends === null) return `${form}<p class="empty">Loading friends…</p>`;
-    if (!friends.length) {
-      return `${form}<div class="empty-buddy">
-        <p class="bubble">No friends yet! Add one above to battle and race them — try mira, theo or ana.</p>
-        ${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}
-      </div>`;
-    }
-    return `${form}<ul class="opponents">${friends.map((f) => buddyRow(
-      f,
-      ` · you ${f.headToHead.wins}–${f.headToHead.losses}`,
-      `${battleButton(f.userId)}
-       <button class="btn btn-ghost btn-small" data-remove="${f.userId}"
-         aria-label="Remove ${escapeHtml(f.username)} from friends">Remove</button>`,
-    )).join('')}</ul>`;
+    // Requests waiting for an answer come first, then the ones this player sent.
+    const incomingHtml = incoming.length ? `
+      <h3>Friend requests</h3>
+      <ul class="opponents">${incoming.map((r) => buddyRow(
+        r,
+        ' wants to be friends',
+        `<button class="btn btn-primary btn-small" data-accept="${r.userId}"
+           aria-label="Accept ${escapeHtml(r.username)}'s friend request">Accept</button>
+         <button class="btn btn-ghost btn-small" data-decline="${r.userId}"
+           aria-label="Decline ${escapeHtml(r.username)}'s friend request">Decline</button>`,
+      )).join('')}</ul>` : '';
+    const outgoingHtml = outgoing.length ? `
+      <h3>Sent requests</h3>
+      <ul class="opponents">${outgoing.map((r) => buddyRow(
+        r,
+        ' · waiting for an answer',
+        `<button class="btn btn-ghost btn-small" data-remove="${r.userId}"
+           aria-label="Cancel your friend request to ${escapeHtml(r.username)}">Cancel</button>`,
+      )).join('')}</ul>` : '';
+    const friendsList = friends.length
+      ? `<ul class="opponents">${friends.map((f) => buddyRow(
+        f,
+        ` · you ${f.headToHead.wins}–${f.headToHead.losses}`,
+        `${battleButton(f.userId)}
+         <button class="btn btn-ghost btn-small" data-remove="${f.userId}"
+           aria-label="Remove ${escapeHtml(f.username)} from friends">Remove</button>`,
+      )).join('')}</ul>`
+      : `<div class="empty-buddy">
+          <p class="bubble">No friends yet! Send a request above and battle them once they accept — or try mira, theo or ana.</p>
+          ${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}
+        </div>`;
+    return `${form}${incomingHtml}${outgoingHtml}<h3>Friends</h3>${friendsList}`;
   }
 
   function everyoneHtml() {
@@ -91,10 +112,13 @@ export function mount(el) {
       o,
       '',
       `${battleButton(o.userId)}
-       ${o.isFriend
+       ${o.friendStatus === 'friend'
         ? '<span class="tag is-win">Friend</span>'
-        : `<button class="btn btn-small btn-icon" data-add="${escapeHtml(o.username)}"
-            aria-label="Add ${escapeHtml(o.username)} as a friend">${icons.plus}</button>`}`,
+        : o.friendStatus === 'requested'
+          ? '<span class="tag">Asked</span>'
+          : `<button class="btn btn-small btn-icon" data-add="${escapeHtml(o.username)}"
+              aria-label="${o.friendStatus === 'incoming' ? 'Accept' : 'Send'} a friend request ${
+                o.friendStatus === 'incoming' ? 'from' : 'to'} ${escapeHtml(o.username)}">${icons.plus}</button>`}`,
     )).join('')}</ul>`;
   }
 
@@ -141,7 +165,9 @@ export function mount(el) {
         <div class="record-pill" aria-label="${record.wins} wins, ${record.losses} losses">
           <span class="is-win">${record.wins} W</span><span class="is-loss">${record.losses} L</span></div>
       </header>
-      ${segmented('view', { friends: 'Friends', everyone: 'Everyone', ranks: 'Ranks' }, view)}
+      ${segmented('view', {
+        friends: `Friends${incoming.length ? ` (${incoming.length})` : ''}`, everyone: 'Everyone', ranks: 'Ranks',
+      }, view)}
       ${view === 'ranks' ? '' : `<p class="hint hint-top">${escapeHtml(buddy.name)} ${elementTag(buddy.element)} has
         ${buddy.attack} attack and ${buddy.evasion} evasion. Strong against ${ELEMENT_LABELS[ELEMENT_BEATS[buddy.element]]},
         weak against ${ELEMENT_LABELS[weakTo(buddy.element)]}. Win a battle to earn 5 bonus Stride Points.
@@ -154,9 +180,14 @@ export function mount(el) {
     if (input && typed) input.value = typed;
   }
 
-  async function loadFriends() {
-    friends = (await api('/friends')).friends;
+  // Every friends answer from the server carries all three lists.
+  function setFriends(data) {
+    ({ friends, incoming, outgoing } = data);
     render();
+  }
+
+  async function loadFriends() {
+    setFriends(await api('/friends'));
   }
 
   async function loadOpponents() {
@@ -176,10 +207,23 @@ export function mount(el) {
   const refresh = () => loaders[view]().catch((err) => toast(err.message, 'warn'));
 
   async function addFriend(username) {
-    friends = (await api('/friends', { method: 'POST', body: { username } })).friends;
-    if (opponents) opponents = opponents.map((o) => (o.username === username ? { ...o, isFriend: true } : o));
-    toast(`You and ${username} are now friends!`, 'good');
-    render();
+    const data = await api('/friends', { method: 'POST', body: { username } });
+    // Accepted straight away when they had already asked this player.
+    const friendStatus = data.status === 'accepted' ? 'friend' : 'requested';
+    if (opponents) {
+      opponents = opponents.map((o) => (o.username.toLowerCase() === username.toLowerCase() ? { ...o, friendStatus } : o));
+    }
+    toast(data.status === 'accepted'
+      ? `You and ${username} are now friends!`
+      : `Friend request sent to ${username}.`, 'good');
+    setFriends(data);
+  }
+
+  async function respond(userId, accept) {
+    const name = incoming.find((r) => r.userId === userId)?.username;
+    setFriends(await api('/friends/respond', { method: 'POST', body: { userId, accept } }));
+    opponents = null; // their friend status changed
+    if (accept) toast(`You and ${name} are now friends!`, 'good');
   }
 
   async function challenge(opponentId) {
@@ -229,11 +273,12 @@ export function mount(el) {
     if (hit('add')) return exclusive(() => addFriend(hit('add')));
     if (hit('remove')) {
       return exclusive(async () => {
-        friends = (await api('/friends/remove', { method: 'POST', body: { userId: Number(hit('remove')) } })).friends;
         opponents = null;
-        render();
+        setFriends(await api('/friends/remove', { method: 'POST', body: { userId: Number(hit('remove')) } }));
       });
     }
+    if (hit('accept')) return exclusive(() => respond(Number(hit('accept')), true));
+    if (hit('decline')) return exclusive(() => respond(Number(hit('decline')), false));
   };
 
   const onSubmit = (event) => {

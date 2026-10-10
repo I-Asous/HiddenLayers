@@ -48,7 +48,7 @@ npm start              # or: npm run dev  (restarts on file changes)
 - App: http://localhost:3000
 - Demo mode: http://localhost:3000/?demo=1 (adds a **Demo Walk** button on the Map tab, so you can test without walking around)
 
-Demo opponents to battle or add as friends: `mira`, `theo`, `ana`.
+Demo opponents to battle or add as friends: `mira`, `theo`, `ana`. Adding a real player sends them a friend request to accept or decline; the demo accounts accept straight away, since nobody is there to answer.
 
 ### Environment variables
 
