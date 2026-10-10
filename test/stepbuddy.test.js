@@ -199,6 +199,22 @@ test('signing in again returns the same account', async () => {
   assert.equal(unknown.data.buddy.species, 'dragon');
 });
 
+test('the login screen can ask to only sign in or only sign up', async () => {
+  const missing = await call('POST', '/login', { username: 'nobody_here', mode: 'login' }, null);
+  assert.equal(missing.status, 404);
+  const taken = await call('POST', '/login', { username: 'walker', mode: 'signup' }, null);
+  assert.equal(taken.status, 409);
+
+  assert.equal((await call('GET', '/username?name=fresh', null, null)).data.available, true);
+  assert.equal((await call('GET', '/username?name=Walker', null, null)).data.available, false);
+  assert.equal((await call('GET', '/username?name=no%20spaces', null, null)).status, 400);
+
+  const created = await call('POST', '/login', { username: 'fresh', buddyName: 'Ash', species: 'phoenix', mode: 'signup' }, null);
+  assert.equal(created.data.buddy.species, 'phoenix');
+  const back = await call('POST', '/login', { username: 'fresh', mode: 'login' }, null);
+  assert.equal(back.data.buddy.name, 'Ash');
+});
+
 test('steps are never counted twice', async () => {
   const first = await call('POST', '/steps/sync', { sessionId: 'session-aaaa', total: 2550 });
   assert.equal(first.data.added, 2550);
