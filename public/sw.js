@@ -1,7 +1,7 @@
 // Network first, cache as a fallback: the app always runs the latest code when
 // online and still opens from the home screen when the connection drops.
 // API calls are never cached — balances and steps must come from the server.
-const CACHE = 'stepbuddy-v18';
+const CACHE = 'stepbuddy-v19';
 const SHELL = [
   '/', '/css/styles.css', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png',
   '/js/app.js', '/js/api.js', '/js/buddy.js', '/js/fx.js', '/js/state.js', '/js/steps.js', '/js/icons.js',

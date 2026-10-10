@@ -9,7 +9,7 @@
 //   through a WebGLOverlayView. Colours then come from the Map ID's cloud style.
 import { api } from '../api.js';
 import { SPECIES, buddySvg } from '../buddy.js';
-import { escapeHtml, fmt, toast } from '../fx.js';
+import { escapeHtml, fmt, fmtDistance, toast } from '../fx.js';
 import { distanceM, pathLengthM, pointAlong } from '../geo.js';
 import { gps } from '../gps.js';
 import { prepareCharacter } from '../rig.js';
@@ -151,7 +151,7 @@ export function mount(el) {
   function updateCard() {
     const steps = walk.sessionSteps;
     const meters = Math.max(walk.gpsMeters, steps * 0.762);
-    $('map-distance').textContent = meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`;
+    $('map-distance').textContent = fmtDistance(meters);
     $('map-steps').textContent = fmt(steps);
     $('map-points').innerHTML = `${pointIcon}${fmt(Math.floor(steps / 100))}`;
     $('map-walk').textContent = walk.walking ? 'End Walk' : 'Start Walk';
