@@ -186,7 +186,20 @@ export const COSMETICS = [
   { id: 'bg-beach', slot: 'background', name: 'Beach', price: 20 },
   { id: 'bg-city', slot: 'background', name: 'City', price: 30 },
   { id: 'bg-space', slot: 'background', name: 'Space', price: 50 },
+  { id: 'bg-meadow', slot: 'background', name: 'Meadow', price: 18 },
+  { id: 'bg-desert', slot: 'background', name: 'Desert', price: 25 },
+  { id: 'bg-snow', slot: 'background', name: 'Snowfield', price: 30 },
+  { id: 'bg-sunset', slot: 'background', name: 'Sunset', price: 40 },
+  { id: 'bg-cave', slot: 'background', name: 'Crystal Cave', price: 45 },
+  { id: 'bg-moonwood', slot: 'background', name: 'Moonlit Woods', price: 55 },
+  // Rare and legendary scenes can only be bought with diamonds.
+  { id: 'bg-reef', slot: 'background', name: 'Coral Reef', price: 40, currency: 'diamonds', rarity: 'rare' },
+  { id: 'bg-volcano', slot: 'background', name: 'Volcano', price: 40, currency: 'diamonds', rarity: 'rare' },
+  { id: 'bg-aurora', slot: 'background', name: 'Aurora', price: 120, currency: 'diamonds', rarity: 'legendary' },
+  { id: 'bg-throne', slot: 'background', name: 'Throne Room', price: 120, currency: 'diamonds', rarity: 'legendary' },
 ];
+// What an item costs in: Stride Points unless it says diamonds.
+export const cosmeticCurrency = (id) => COSMETICS.find((item) => item.id === id)?.currency ?? 'points';
 
 // Eggs sold in the store, one per beast added after the first three. Common and
 // uncommon eggs cost Stride Points; rare and legendary ones cost diamonds.

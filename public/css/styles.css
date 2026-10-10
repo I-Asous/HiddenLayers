@@ -96,7 +96,7 @@ a { color: inherit; text-decoration: none; }
 
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 2px;
   padding: 6px 6px calc(6px + var(--safe-bottom));
   background: var(--panel);
@@ -514,7 +514,10 @@ input::placeholder { color: var(--slate); }
 }
 
 .team-slot.is-walking { border-color: var(--yellow); color: var(--yellow); }
-.team-slot:active:not(.is-walking) { transform: translate(2px, 2px); }
+.team-slot.is-tired .buddy { opacity: 0.45; }
+.team-slot.is-tired { color: var(--orange); }
+.edge a { text-decoration: underline; }
+.team-slot:active { transform: translate(2px, 2px); }
 
 /* The wardrobe: slot tabs along the bottom of the beast's card, and a shelf of
    what the player owns for the open slot. */
@@ -536,6 +539,7 @@ input::placeholder { color: var(--slate); }
 }
 
 .wardrobe-item.is-equipped { border-color: var(--yellow); }
+.wardrobe-item.is-taken { opacity: 0.4; }
 .wardrobe-item:active { transform: translate(2px, 2px); }
 .wardrobe-empty { padding: var(--s3); font-size: 19px; color: var(--muted); text-align: center; }
 .wardrobe-empty a { color: var(--yellow); text-decoration: underline; }
@@ -1053,6 +1057,25 @@ input::placeholder { color: var(--slate); }
 .sheet .stat { background: var(--bg); }
 .icon-btn { width: 44px; height: 44px; border: var(--border); background: var(--red); font-family: var(--pixel); font-size: 12px; }
 .record { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.record-4 { grid-template-columns: repeat(4, 1fr); }
+/* Four beast numbers side by side need smaller figures. */
+.record-4 .stat { gap: var(--s1); padding: var(--s2) var(--s1); min-width: 0; text-align: center; }
+.record-4 .stat b { font-size: 12px; }
+/* The profile reads top to bottom: a heading, then one thing per line, with room between sections. */
+.profile, .sheet-section { display: flex; flex-direction: column; gap: 14px; }
+.profile h3 { margin: var(--s4) 0 0; padding-top: var(--s4); border-top: 2px solid var(--panel-dim); }
+.profile .sheet-section > h3:first-child { margin-top: 0; }
+.stat-list { list-style: none; margin: 0; padding: 0; background: var(--bg); border: 2px solid var(--panel-dim); }
+.stat-list li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); padding: var(--s3); font-size: 21px; }
+.stat-list li + li { border-top: 2px solid var(--panel-dim); }
+.stat-list span { color: var(--muted); }
+.stat-list b { font-weight: normal; color: var(--ink); text-align: right; }
+.profile .history li { padding: var(--s3); }
+.profile #signout { margin-top: var(--s4); }
+.profile .chart-card { background: var(--bg); border-width: 2px; border-color: var(--panel-dim); }
+.beast-card { display: grid; grid-template-columns: 112px 1fr; gap: var(--s3); align-items: center; }
+.beast-card b { font-family: var(--pixel); font-size: 11px; color: var(--yellow); }
+.beast-card > div:last-child { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
 .stat.is-win b { color: var(--lime); }
 .stat.is-loss b { color: var(--orange); }
 .history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -1089,10 +1112,6 @@ input::placeholder { color: var(--slate); }
 .bar-slot.is-today .bar-mark { fill: var(--yellow); }
 .bar-slot.is-active .bar-mark { fill: var(--ink); }
 .bar-slot.is-active .axis-text { fill: var(--ink); }
-.line-mark { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-linejoin: miter; stroke-linecap: square; }
-.line-area { fill: var(--cyan); opacity: 0.12; }
-.crosshair-line { stroke: var(--ink); stroke-width: 1; shape-rendering: crispEdges; }
-.crosshair-dot { fill: var(--ink); }
 
 /* ---------- Window frame ---------- */
 

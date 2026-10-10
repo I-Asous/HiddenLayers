@@ -6,11 +6,10 @@ import * as battle from './screens/battle.js';
 import * as home from './screens/home.js';
 import * as map from './screens/map.js';
 import { personalityOptions } from './screens/profile.js';
-import * as stats from './screens/stats.js';
 import * as store from './screens/store.js';
 import * as walkScreen from './screens/walk.js';
 
-const SCREENS = { home, walk: walkScreen, map, battle, store, stats };
+const SCREENS = { home, walk: walkScreen, map, battle, store };
 // Drawn on a 12×12 pixel grid.
 const TAB_ICONS = {
   home: '<path d="M5 1h2v1h1v1h1v1h1v1h1v1h-1v5h-3v-3h-2v3h-3v-5h-1v-1h1v-1h1v-1h1v-1h1z"/>',
@@ -18,9 +17,8 @@ const TAB_ICONS = {
   map: '<path fill-rule="evenodd" d="M4 1h4v1h1v1h1v4h-1v1h-1v1h-1v2h-2v-2h-1v-1h-1v-1h-1v-4h1v-1h1zM5 4v2h2v-2z"/>',
   store: '<path fill-rule="evenodd" d="M4 1h4v2h2v8h-8v-8h2zM5 2v1h2v-1z"/>',
   battle: '<path d="M9 1h2v2h-1v1h-1v1h-1v1h-1v1h1v1h-1v-1h-1v1h-1v1h-1v1h-2v-2h1v-1h1v-1h1v-1h-1v-1h1v1h1v-1h1v-1h1v-1h1v-1h1z"/>',
-  stats: '<path d="M1 7h2v4h-2zM5 3h2v8h-2zM9 5h2v6h-2z"/>',
 };
-const TAB_LABELS = { home: 'Home', walk: 'Walk', map: 'Map', store: 'Store', battle: 'Battle', stats: 'Stats' };
+const TAB_LABELS = { home: 'Home', walk: 'Walk', map: 'Map', store: 'Store', battle: 'Battle' };
 
 const root = document.getElementById('app');
 let current = null; // { name, screen }
@@ -179,9 +177,23 @@ handleSignedOut(() => {
 // Save steps when the app is backgrounded: phones may freeze or kill the page
 // without another chance to sync.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') walk.sync({ keepalive: true });
-  else walk.resume();
+  if (document.visibilityState === 'hidden') return walk.sync({ keepalive: true });
+  walk.resume();
+  refreshOnNewDay();
 });
+
+// Today's steps start again from zero at midnight. The server counts them by
+// the player's own day, so an app left open (or reopened the next morning)
+// only has to ask again once the date changes.
+let shownDay = new Date().toDateString();
+function refreshOnNewDay() {
+  const today = new Date().toDateString();
+  if (today === shownDay || !app.state) return;
+  shownDay = today;
+  // On a failure, forget the day so the next check tries again.
+  app.refresh().catch(() => { shownDay = null; });
+}
+setInterval(refreshOnNewDay, 30_000);
 
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

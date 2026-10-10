@@ -9,7 +9,8 @@ import {
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_ROUNDS, BATTLE_WIN_BONUS, COIN_PACKAGES, EGGS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse, elementOf, matchup,
+  BATTLE_ROUNDS, BATTLE_WIN_BONUS, COIN_PACKAGES, COSMETICS, EGGS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse, cosmeticCurrency, elementOf,
+  matchup,
   moodFor, newBattle, opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from './game.js';
 
@@ -32,7 +33,7 @@ const MAX_SESSION_STEPS = 200_000;
 // switches which one they walk with.
 const BUDDY_COLUMNS = [
   'name', 'species', 'level', 'attack', 'evasion', 'xp', 'stage', 'hat', 'eyewear', 'accessory', 'background',
-  'personality',
+  'personality', 'rest_until',
 ];
 
 class HttpError extends Error {
@@ -151,17 +152,9 @@ export async function createApp({ dbFile, dataDir }) {
     return { wins: row.wins, losses: row.losses, draws: row.draws };
   }
 
-  // When the buddy can start a battle again after losing one it started, or
-  // null if it is ready now. Being beaten as the opponent costs no rest.
-  async function restingUntil(userId, buddy) {
-    const last = await db.get(`
-      SELECT winner_id, created_at FROM battles WHERE challenger_id = ?
-      ORDER BY created_at DESC, id DESC LIMIT 1
-    `, [userId]);
-    if (!last || last.winner_id === null || last.winner_id === userId) return null;
-    const until = Number(last.created_at) + restAfterLoss(buddy.level);
-    return until > Date.now() ? until : null;
-  }
+  // When a beast can start a battle again after losing one it started, or null
+  // if it is ready now. Each beast rests on its own.
+  const restingUntil = (beast) => (Number(beast.rest_until) > Date.now() ? Number(beast.rest_until) : null);
 
   async function state(userId, tz) {
     const user = await getUser(userId);
@@ -175,10 +168,10 @@ export async function createApp({ dbFile, dataDir }) {
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
-        personality: traitsOf(buddy), mood, moodUntil, restingUntil: await restingUntil(userId, buddy),
+        personality: traitsOf(buddy), mood, moodUntil, restingUntil: restingUntil(buddy),
       },
       resting: (await db.all('SELECT * FROM resting_buddies WHERE user_id = ? ORDER BY id', [userId]))
-        .map((b) => ({ id: b.id, ...publicBuddy(b) })),
+        .map((b) => ({ id: b.id, ...publicBuddy(b), xp: b.xp, personality: traitsOf(b), restingUntil: restingUntil(b) })),
       todaySteps: (await stepsByDay(db, userId, tz)).get(today) ?? 0,
       record: await record(userId),
     };
@@ -196,13 +189,18 @@ export async function createApp({ dbFile, dataDir }) {
 
   // Records a finished (or abandoned) battle and pays the winner.
   async function endBattle(userId, { forfeit = false } = {}) {
-    const { opponentId, battle, log } = liveBattles.get(userId);
+    const { opponentId, battle, log, sides } = liveBattles.get(userId);
     liveBattles.delete(userId);
     const winner = forfeit ? 'b' : battle.winner;
     const winnerId = winner === 'a' ? userId : winner === 'b' ? opponentId : null;
     await transaction(db, async (tx) => {
       if (winnerId) await addPoints(tx, winnerId, BATTLE_WIN_BONUS);
       await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [winnerId === userId ? 10 : 2, userId]);
+      // Only the beast that fought and lost has to rest; being beaten as the opponent costs nothing.
+      if (winner === 'b') {
+        await tx.run('UPDATE buddies SET rest_until = ? WHERE user_id = ?',
+          [Date.now() + restAfterLoss(sides.a.level), userId]);
+      }
       await tx.run(`
         INSERT INTO battles (challenger_id, opponent_id, winner_id, challenger_damage, opponent_damage, log, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -307,23 +305,37 @@ export async function createApp({ dbFile, dataDir }) {
         }
         await db.run('UPDATE users SET daily_goal = ? WHERE id = ?', [goal, userId]);
       }
+      // The name and personality go to the beast walking with the player, or
+      // to one of their resting beasts when beastId names it.
+      const resting = body.beastId !== undefined;
+      if (resting) {
+        const beast = Number.isInteger(body.beastId)
+          && await db.get('SELECT 1 FROM resting_buddies WHERE id = ? AND user_id = ?', [body.beastId, userId]);
+        if (!beast) throw new HttpError(404, 'You don\'t have that beast');
+      }
+      const [table, where, key] = resting
+        ? ['resting_buddies', 'id = ?', body.beastId]
+        : ['buddies', 'user_id = ?', userId];
       if (body.buddyName !== undefined) {
         const name = String(body.buddyName).trim().slice(0, 16);
         if (!name) throw new HttpError(400, 'Your buddy needs a name');
-        await db.run('UPDATE buddies SET name = ? WHERE user_id = ?', [name, userId]);
+        await db.run(`UPDATE ${table} SET name = ? WHERE ${where}`, [name, key]);
       }
       // A preset id, or 'surprise' for a fresh invented one.
       if (body.personality !== undefined) {
         const preset = presetById(body.personality);
         if (!preset && body.personality !== 'surprise') throw new HttpError(400, 'Unknown personality');
-        const current = (await getBuddy(userId)).personality;
+        const { personality: current } = await db.get(`SELECT personality FROM ${table} WHERE ${where}`, [key]);
         if (!preset || JSON.parse(current ?? '{}').id !== preset.id) {
-          await db.run('UPDATE buddies SET personality = ? WHERE user_id = ?', [preset ? JSON.stringify(preset) : null, userId]);
-          // Lines and memories in the old voice would sound out of character.
-          await db.run('DELETE FROM ready_lines WHERE user_id = ?', [userId]);
-          await db.run('DELETE FROM buddy_memory WHERE user_id = ?', [userId]);
-          await ensurePersonality(userId);
-          prepareLines(userId, tz);
+          await db.run(`UPDATE ${table} SET personality = ? WHERE ${where}`, [preset ? JSON.stringify(preset) : null, key]);
+          // A resting beast with no personality gets one when it next walks with the player.
+          if (!resting) {
+            // Lines and memories in the old voice would sound out of character.
+            await db.run('DELETE FROM ready_lines WHERE user_id = ?', [userId]);
+            await db.run('DELETE FROM buddy_memory WHERE user_id = ?', [userId]);
+            await ensurePersonality(userId);
+            prepareLines(userId, tz);
+          }
         }
       }
       return state(userId, tz);
@@ -398,6 +410,10 @@ export async function createApp({ dbFile, dataDir }) {
         `, [userId, String(body.itemId)]);
         if (!item) throw new HttpError(403, 'You don\'t own that item');
         if (item.slot !== body.slot) throw new HttpError(400, 'That item doesn\'t fit this slot');
+        // There is one of each item: a beast resting at home may be wearing it.
+        const wearer = await db.get(`SELECT name FROM resting_buddies WHERE user_id = ? AND ${body.slot} = ?`,
+          [userId, item.id]);
+        if (wearer) throw new HttpError(409, `${wearer.name} is wearing that. Take it off them first`);
         itemId = item.id;
       }
       await db.run(`UPDATE buddies SET ${body.slot} = ? WHERE user_id = ?`, [itemId, userId]);
@@ -407,6 +423,8 @@ export async function createApp({ dbFile, dataDir }) {
     // Swaps the buddy the player walks with for one of their resting beasts.
     'POST /api/buddy/switch': async ({ userId, body, tz }) => {
       if (!Number.isInteger(body.id)) throw new HttpError(400, 'Unknown beast');
+      // Swapping beasts mid-battle counts as losing it, so the rest lands on the one that fought.
+      if (liveBattles.has(userId)) await endBattle(userId, { forfeit: true });
       await transaction(db, async (tx) => {
         const next = await tx.get('SELECT * FROM resting_buddies WHERE id = ? AND user_id = ?', [body.id, userId]);
         if (!next) throw new HttpError(404, 'You don\'t have that beast');
@@ -436,7 +454,7 @@ export async function createApp({ dbFile, dataDir }) {
         if (!item) throw new HttpError(404, 'No such item');
         const owned = await tx.get('SELECT 1 FROM owned_cosmetics WHERE user_id = ? AND cosmetic_id = ?', [userId, item.id]);
         if (owned) throw new HttpError(409, 'You already own that');
-        await spendPoints(tx, userId, item.price);
+        await (cosmeticCurrency(item.id) === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, item.price);
         await tx.run('INSERT INTO owned_cosmetics (user_id, cosmetic_id, bought_at) VALUES (?, ?, ?)',
           [userId, item.id, Date.now()]);
       });
@@ -549,7 +567,7 @@ export async function createApp({ dbFile, dataDir }) {
       if (!theirs) throw new HttpError(404, 'That buddy has wandered off');
       // Walking away from a battle to start another counts as losing it.
       if (liveBattles.has(userId)) await endBattle(userId, { forfeit: true });
-      const until = await restingUntil(userId, mine);
+      const until = restingUntil(await getBuddy(userId));
       if (until) {
         const seconds = Math.ceil((until - Date.now()) / 1000);
         const left = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -620,6 +638,18 @@ export async function createApp({ dbFile, dataDir }) {
       for (const [d, steps] of byDay) {
         if (!best || steps > best.steps) best = { date: dayLabel(d), steps };
       }
+      // The last 12 calendar months, this one included, oldest first.
+      const byMonth = new Map();
+      for (const [d, steps] of byDay) {
+        const month = dayLabel(d).slice(0, 7);
+        byMonth.set(month, (byMonth.get(month) ?? 0) + steps);
+      }
+      const [year, thisMonth] = dayLabel(today).split('-').map(Number);
+      const months = [];
+      for (let back = 11; back >= 0; back--) {
+        const month = new Date(Date.UTC(year, thisMonth - 1 - back, 1)).toISOString().slice(0, 7);
+        months.push({ month, steps: byMonth.get(month) ?? 0 });
+      }
       const km = (user.total_steps * 0.762) / 1000;
       return {
         todaySteps: byDay.get(today) ?? 0,
@@ -630,6 +660,7 @@ export async function createApp({ dbFile, dataDir }) {
         distanceKm: km,
         co2SavedKg: km * 0.17,
         days,
+        months,
       };
     },
 
@@ -678,7 +709,10 @@ export async function createApp({ dbFile, dataDir }) {
       FROM cosmetics c
       LEFT JOIN owned_cosmetics o ON o.cosmetic_id = c.id AND o.user_id = ?
       ORDER BY c.sort
-    `, [userId])).map((item) => ({ ...item, owned: Boolean(item.owned) }));
+    `, [userId])).map((item) => ({
+      ...item, owned: Boolean(item.owned), currency: cosmeticCurrency(item.id),
+      rarity: COSMETICS.find(({ id }) => id === item.id)?.rarity ?? null,
+    }));
   }
 
   async function handleApi(req, res, url) {

@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, before, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { GpsFilter, distanceM, bearingDeg, pathLengthM, pointAlong, stepsFromMeters } from '../public/js/geo.js';
-import { SPECIES_IDS, buddyPixels } from '../public/js/buddy.js';
+import { SPECIES_IDS, buddyPixels, cosmeticIcon } from '../public/js/buddy.js';
 import { ELEMENT_BEATS as CLIENT_ELEMENT_BEATS } from '../public/js/elements.js';
 import { StepDetector } from '../public/js/steps.js';
 import {
@@ -14,7 +14,7 @@ import {
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  COIN_PACKAGES, EGGS, ELEMENT_BEATS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
+  COIN_PACKAGES, COSMETICS, EGGS, ELEMENT_BEATS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
   opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
@@ -289,10 +289,10 @@ before(async () => {
 
 after(() => server.close());
 
-// Skips the rest after a lost battle by moving the player's battles into the past.
+// Skips the rest the player's beast needs after a lost battle.
 function rested(userId) {
   const db = new DatabaseSync(dbFile);
-  db.prepare('UPDATE battles SET created_at = created_at - 3600000 WHERE challenger_id = ?').run(userId);
+  db.prepare('UPDATE buddies SET rest_until = NULL WHERE user_id = ?').run(userId);
   db.close();
 }
 
@@ -345,6 +345,23 @@ test('steps are never counted twice', async () => {
   assert.equal(more.data.added, 50);
   assert.equal(more.data.user.points, 26);
   assert.equal(more.data.todaySteps, 2600);
+});
+
+test('today\'s steps start again from zero each day', async () => {
+  const login = (await call('POST', '/login', { username: 'nightowl' }, null)).data;
+  const today = async () => (await call('GET', '/me', null, login.token)).data.todaySteps;
+  const db = new DatabaseSync(dbFile);
+  try {
+    db.prepare('INSERT INTO walk_sessions (id, user_id, started_at) VALUES (?, ?, ?)')
+      .run('session-night', login.user.id, Date.now() - 86_400_000);
+    db.prepare('INSERT INTO step_events (user_id, session_id, timestamp, steps) VALUES (?, ?, ?, ?)')
+      .run(login.user.id, 'session-night', Date.now() - 86_400_000, 900);
+    assert.equal(await today(), 0); // yesterday's steps don't count towards today
+    await call('POST', '/steps/sync', { sessionId: 'session-morning', total: 300 }, login.token);
+    assert.equal(await today(), 300);
+  } finally {
+    db.close();
+  }
 });
 
 test('a walk session belongs to one user', async () => {
@@ -407,6 +424,57 @@ test('store: coin packages credit the wallet without trusting the client amount'
   assert.equal(purchase.data.purchased.coins, COIN_PACKAGES[0].coins);
   assert.equal(purchase.data.user.coins, before + COIN_PACKAGES[0].coins);
   assert.equal((await call('POST', '/store/buy-coins', { packageId: 'unknown' })).status, 404);
+});
+
+test('scenes: every one has artwork, and the rare ones cost diamonds only', async () => {
+  const scenes = COSMETICS.filter((item) => item.slot === 'background');
+  assert.equal(scenes.length, 14);
+  for (const scene of scenes) assert.match(cosmeticIcon(scene), /<rect/);
+  assert.equal(scenes.filter((scene) => scene.currency === 'diamonds').length, 4);
+
+  const login = (await call('POST', '/login', { username: 'decorator' }, null)).data;
+  const auth = login.token;
+  await call('POST', '/steps/sync', { sessionId: 'session-decor', total: 20000, ended: true }, auth);
+  const listed = (await call('GET', '/store', null, auth)).data.items.find((item) => item.id === 'bg-aurora');
+  assert.deepEqual([listed.currency, listed.rarity, listed.price], ['diamonds', 'legendary', 120]);
+  assert.equal((await call('GET', '/store', null, auth)).data.items.find((item) => item.id === 'bg-meadow').currency, 'points');
+
+  // 200 Stride Points don't buy a diamond scene.
+  assert.equal((await call('POST', '/store/buy', { itemId: 'bg-aurora' }, auth)).status, 402);
+  await call('POST', '/store/buy-coins', { packageId: COIN_PACKAGES.find((pack) => pack.coins >= 120).id }, auth);
+  const before = (await call('GET', '/me', null, auth)).data.user;
+  const bought = (await call('POST', '/store/buy', { itemId: 'bg-aurora' }, auth)).data;
+  assert.deepEqual([bought.user.coins, bought.user.points], [before.coins - 120, before.points]);
+  const worn = await call('POST', '/buddy/equip', { slot: 'background', itemId: 'bg-aurora' }, auth);
+  assert.equal(worn.data.buddy.equipped.background, 'bg-aurora');
+});
+
+test('an item can only be worn by one beast at a time', async () => {
+  const login = (await call('POST', '/login', { username: 'dresser' }, null)).data;
+  const auth = login.token;
+  await call('POST', '/steps/sync', { sessionId: 'session-dress', total: 1000, ended: true }, auth);
+  await call('POST', '/store/buy', { itemId: 'party-hat' }, auth);
+  const db = new DatabaseSync(dbFile);
+  db.prepare("INSERT INTO resting_buddies (user_id, name, species) VALUES (?, 'Spare', ?)")
+    .run(login.user.id, SPECIES.find((id) => id !== login.buddy.species));
+  db.close();
+  const wear = (itemId) => call('POST', '/buddy/equip', { slot: 'hat', itemId }, auth);
+  const swap = async () => {
+    const { resting } = (await call('GET', '/me', null, auth)).data;
+    return (await call('POST', '/buddy/switch', { id: resting[0].id }, auth)).data;
+  };
+
+  assert.equal((await wear('party-hat')).data.buddy.equipped.hat, 'party-hat');
+  // The hat goes home with the beast wearing it, so the other one can't have it.
+  assert.equal((await swap()).resting[0].equipped.hat, 'party-hat');
+  const refused = await wear('party-hat');
+  assert.equal(refused.status, 409);
+  assert.match(refused.data.error, /is wearing that/);
+  // Once the first beast takes it off, it is free again.
+  await swap();
+  await wear(null);
+  await swap();
+  assert.equal((await wear('party-hat')).data.buddy.equipped.hat, 'party-hat');
 });
 
 test('eggs: rarity sets the currency, a bought egg rests until switched to', async () => {
@@ -520,7 +588,7 @@ test('running away, or starting another battle, loses the one in progress', asyn
   assert.equal((await call('GET', '/me', null, runner)).data.record.losses, 2);
 });
 
-test('losing a battle you started means resting, longer for a bigger beast', async () => {
+test('a beast that loses a battle it started rests, longer when bigger, and only that beast', async () => {
   const login = (await call('POST', '/login', { username: 'sleepyhead' }, null)).data;
   const [auth, userId] = [login.token, login.user.id];
   assert.equal(login.buddy.restingUntil, null);
@@ -538,33 +606,44 @@ test('losing a battle you started means resting, longer for a bigger beast', asy
     assert.match(refused.data.error, /resting.*0:3\d/);
     assert.equal((await call('GET', '/me', null, auth)).data.record.losses, 1);
 
-    // An evolved beast needs longer.
-    db.prepare("UPDATE buddies SET level = 12, stage = 'teen' WHERE user_id = ?").run(userId);
-    near((await call('GET', '/me', null, auth)).data.buddy.restingUntil - Date.now(), restAfterLoss(12));
+    // Another beast is fresh: switching to it gets the player straight back in.
+    const species = SPECIES.find((id) => id !== login.buddy.species);
+    db.prepare("INSERT INTO resting_buddies (user_id, name, species, level, stage) VALUES (?, 'Spare', ?, 12, 'teen')")
+      .run(userId, species);
+    const spare = (await call('GET', '/me', null, auth)).data.resting[0];
+    assert.equal(spare.restingUntil, null);
+    const swapped = (await call('POST', '/buddy/switch', { id: spare.id }, auth)).data;
+    assert.equal(swapped.buddy.restingUntil, null);
+    near(swapped.resting[0].restingUntil - Date.now(), restAfterLoss(1));
+
+    // An evolved beast needs longer, and swapping away mid-battle loses it.
+    const { battle } = (await call('POST', '/battles', { opponentId: 1 }, auth)).data;
+    const back = (await call('POST', '/buddy/switch', { id: swapped.resting[0].id }, auth)).data;
+    assert.equal(back.record.losses, 2);
+    assert.equal((await call('POST', '/battles/move', { battleId: battle.id, move: 'attack' }, auth)).status, 409);
+    near(back.resting[0].restingUntil - Date.now(), restAfterLoss(12));
+    // The first beast is still resting from its own loss.
+    assert.equal((await call('POST', '/battles', { opponentId: 1 }, auth)).status, 429);
 
     // Once the rest is over the beast can fight again.
     rested(userId);
     assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
-    await lose();
-
-    // Being beaten as the opponent, a draw or a win costs no rest.
-    db.prepare('UPDATE battles SET challenger_id = opponent_id, opponent_id = challenger_id WHERE challenger_id = ?')
-      .run(userId);
-    assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
-    await lose();
-    db.prepare('UPDATE battles SET winner_id = NULL WHERE challenger_id = ?').run(userId);
-    assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
-    db.prepare('UPDATE battles SET winner_id = challenger_id WHERE challenger_id = ?').run(userId);
     assert.equal((await call('POST', '/battles', { opponentId: 1 }, auth)).status, 200);
   } finally {
     db.close();
   }
 });
 
-test('stats report distance, CO2 and a 30-day history', async () => {
+test('stats report distance, CO2, a 30-day and a 12-month history', async () => {
   const { data } = await call('GET', '/stats');
   assert.equal(data.days.length, 30);
   assert.equal(data.days.at(-1).steps, data.todaySteps);
+  // Twelve calendar months in order, ending with this one, where every step was walked.
+  assert.equal(data.months.length, 12);
+  assert.equal(data.months.at(-1).month, data.days.at(-1).date.slice(0, 7));
+  assert.deepEqual(data.months.map((m) => m.month), data.months.map((m) => m.month).sort());
+  assert.equal(new Set(data.months.map((m) => m.month)).size, 12);
+  assert.deepEqual(data.months.map((m) => m.steps), [...Array(11).fill(0), 24600]);
   assert.equal(data.totalSteps, 24600);
   assert.ok(Math.abs(data.distanceKm - 24600 * 0.762 / 1000) < 1e-9);
   assert.ok(Math.abs(data.co2SavedKg - data.distanceKm * 0.17) < 1e-9);
@@ -612,6 +691,29 @@ test('players choose a personality at sign-up and can change it', async () => {
   assert.equal(surprise.data.buddy.personality.traits.length, 3);
   assert.equal((await call('PATCH', '/me', { personality: 'nope' }, auth)).status, 400);
   db.close();
+});
+
+test('a resting beast can be renamed and given a personality, but only by its owner', async () => {
+  const login = (await call('POST', '/login', { username: 'keeper' }, null)).data;
+  const auth = login.token;
+  const db = new DatabaseSync(dbFile);
+  const species = SPECIES.find((id) => id !== login.buddy.species);
+  db.prepare("INSERT INTO resting_buddies (user_id, name, species, xp) VALUES (?, 'Spare', ?, 7)").run(login.user.id, species);
+  db.close();
+  const spare = (await call('GET', '/me', null, auth)).data.resting[0];
+  assert.deepEqual([spare.name, spare.xp, spare.personality], ['Spare', 7, null]);
+
+  const edited = (await call('PATCH', '/me', { beastId: spare.id, buddyName: ' Pip ', personality: 'coach' }, auth)).data;
+  assert.equal(edited.resting[0].name, 'Pip');
+  assert.equal(edited.resting[0].personality.id, 'coach');
+  // The beast walking with the player is left alone.
+  assert.equal(edited.buddy.name, login.buddy.name);
+
+  assert.equal((await call('PATCH', '/me', { beastId: spare.id, buddyName: ' ' }, auth)).status, 400);
+  assert.equal((await call('PATCH', '/me', { beastId: 999999, buddyName: 'X' }, auth)).status, 404);
+  assert.equal((await call('PATCH', '/me', { beastId: 'x', buddyName: 'X' }, auth)).status, 404);
+  // Another player's beast can't be renamed.
+  assert.equal((await call('PATCH', '/me', { beastId: spare.id, buddyName: 'Mine' })).status, 404);
 });
 
 test('buddy lines lose emojis and action text but keep audio tags for speech', () => {

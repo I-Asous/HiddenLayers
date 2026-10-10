@@ -146,7 +146,8 @@ export function mount(el) {
         ${buddy.attack} attack and ${buddy.evasion} evasion. Strong against ${ELEMENT_LABELS[ELEMENT_BEATS[buddy.element]]},
         weak against ${ELEMENT_LABELS[weakTo(buddy.element)]}. Win a battle to earn 5 bonus Stride Points.
         ${restLeft() > 0 ? `<span class="edge is-weak">Resting after a loss: ready in
-          <span data-rest>${clock(restLeft())}</span>.</span>` : ''}</p>`}
+          <span data-rest>${clock(restLeft())}</span>.${app.state.resting.some((b) => !b.restingUntil || b.restingUntil <= Date.now())
+            ? ' <a href="#home">Switch to another beast</a> to keep battling.' : ''}</span>` : ''}</p>`}
       ${view === 'friends' ? friendsHtml() : view === 'everyone' ? everyoneHtml() : ranksHtml()}`;
     // Keep what was being typed when a background refresh redraws the screen.
     const input = el.querySelector('#friend-name');

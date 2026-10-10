@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { SPECIES, buddySvg, cosmeticIcon, stageName } from '../buddy.js';
+import { SPECIES, buddySvg, cosmeticIcon } from '../buddy.js';
 import { elementTag } from '../elements.js';
 import { escapeHtml, fmt, toast } from '../fx.js';
 import { app } from '../state.js';
@@ -34,7 +34,7 @@ const DEFAULT_DIAMOND_PACKAGES = [
   { id: 'diamonds_750', name: 'Diamond Vault', diamonds: 750, priceCents: 999, popular: false },
 ];
 
-const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds', beasts: 'Beasts' };
+const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds' };
 
 export function mount(el) {
   let view = 'store';
@@ -66,22 +66,6 @@ export function mount(el) {
     }).join('')}</div>`;
   }
 
-  function beastsHtml() {
-    const { buddy, resting } = app.state;
-    const tile = (beast, walking) => `
-      <button class="item item-tap ${walking ? 'is-equipped' : ''}" ${walking ? 'disabled' : `data-switch="${beast.id}"`}
-        aria-pressed="${walking}">
-        <div class="item-art">${buddySvg(beast, { background: false })}</div>
-        <b>${escapeHtml(beast.name)}</b>
-        <span class="owned">${stageName(beast)} · Lv ${beast.level}</span>
-        ${elementTag(beast.element)}
-        <span class="owned">${walking ? 'Walking with you' : 'Tap to walk with'}</span>
-      </button>`;
-    return `
-      <div class="grid">${tile(buddy, true)}${resting.map((beast) => tile(beast, false)).join('')}</div>
-      ${resting.length ? '' : '<p class="empty">Buy an egg in the Store to raise another beast.</p>'}`;
-  }
-
   function storeHtml() {
     const { points } = app.state.user;
     const catPills = `
@@ -100,17 +84,23 @@ export function mount(el) {
 
     const grid = visible.length === 0
       ? '<p class="empty">Nothing here yet.</p>'
-      : `<div class="grid">${visible.map((item) => `
+      : `<div class="grid">${visible.map((item) => {
+        // Rare and legendary items cost diamonds; the rest cost Stride Points.
+        const paidInDiamonds = item.currency === 'diamonds';
+        const balance = paidInDiamonds ? app.diamonds : points;
+        return `
         <article class="item ${item.owned ? 'is-owned' : ''}">
           <div class="item-art">${cosmeticIcon(item)}${item.owned
             ? '<span class="stamp">Owned</span>'
-            : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
-          <b>${escapeHtml(item.name)}</b>${item.owned
+            : `<span class="price-tag">${paidInDiamonds ? diamondIcon : pointIcon}${fmt(item.price)}</span>`}</div>
+          <b>${escapeHtml(item.name)}</b>${item.rarity
+            ? `<span class="rarity" data-rarity="${item.rarity}">${item.rarity}</span>` : ''}${item.owned
             ? '<span class="owned">In your wardrobe</span>'
-            : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
-                data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
-                ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
-        </article>`).join('')}</div>`;
+            : `<button class="btn btn-small ${balance < item.price ? 'is-short' : 'btn-primary'}" data-buy="${item.id}"
+                aria-label="Buy ${escapeHtml(item.name)} for ${item.price} ${paidInDiamonds ? 'diamonds' : 'points'}">
+                ${balance < item.price ? `Need ${fmt(item.price - balance)}` : 'Buy'}</button>`}
+        </article>`;
+      }).join('')}</div>`;
 
     return `${catPills}${grid}`;
   }
@@ -133,7 +123,7 @@ export function mount(el) {
   function render() {
     if (!app.state?.user) return;
     const title = VIEW_TITLES[view];
-    const html = { store: storeHtml, diamonds: diamondsHtml, beasts: beastsHtml };
+    const html = { store: storeHtml, diamonds: diamondsHtml };
     el.innerHTML = `
       <header class="topbar">
         <h1>${title}</h1>
@@ -145,16 +135,16 @@ export function mount(el) {
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
         <button role="tab" aria-selected="${view === 'diamonds'}" data-view="diamonds">Diamonds</button>
-        <button role="tab" aria-selected="${view === 'beasts'}" data-view="beasts">Beasts</button>
       </div>
       ${items === null || diamondPackages === null ? '<p class="empty">Loading…</p>' : html[view]()}`;
   }
 
   async function buy(id) {
     const item = items.find((i) => i.id === id);
-    const { points } = app.state.user;
-    if (points < item.price) {
-      toast(`You need ${fmt(item.price - points)} more Stride Points.`, 'warn');
+    const paidInDiamonds = item.currency === 'diamonds';
+    const balance = paidInDiamonds ? app.diamonds : app.state.user.points;
+    if (balance < item.price) {
+      toast(`You need ${fmt(item.price - balance)} more ${paidInDiamonds ? 'diamonds' : 'Stride Points'}.`, 'warn');
       return;
     }
     const result = await api('/store/buy', { method: 'POST', body: { itemId: id } });
@@ -174,12 +164,7 @@ export function mount(el) {
     const result = await api('/store/buy-egg', { method: 'POST', body: { species } });
     eggs = result.eggs;
     app.setState(result);
-    toast(`${SPECIES[species].titles.egg} is yours! Find it under Beasts.`, 'good');
-  }
-
-  async function switchBeast(id) {
-    app.setState(await api('/buddy/switch', { method: 'POST', body: { id } }));
-    toast(`${app.state.buddy.name} is walking with you now.`, 'good');
+    toast(`${SPECIES[species].titles.egg} is yours! Find it on the Home screen.`, 'good');
   }
 
   async function buyDiamonds(id) {
@@ -219,14 +204,12 @@ export function mount(el) {
     }
     const buyBtn = event.target.closest('[data-buy]');
     const eggBtn = event.target.closest('[data-buy-egg]');
-    const switchBtn = event.target.closest('[data-switch]');
     const diamondsBtn = event.target.closest('[data-buy-diamonds]');
-    if ((!buyBtn && !eggBtn && !switchBtn && !diamondsBtn) || busy) return;
+    if ((!buyBtn && !eggBtn && !diamondsBtn) || busy) return;
     busy = true;
     try {
       if (buyBtn) await buy(buyBtn.dataset.buy);
       else if (eggBtn) await buyEgg(eggBtn.dataset.buyEgg);
-      else if (switchBtn) await switchBeast(Number(switchBtn.dataset.switch));
       else await buyDiamonds(diamondsBtn.dataset.buyDiamonds);
     } catch (err) {
       toast(err.message, 'warn');
