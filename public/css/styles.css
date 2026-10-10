@@ -504,6 +504,30 @@ input::placeholder { color: var(--slate); }
 .team-slot.is-walking { border-color: var(--yellow); color: var(--yellow); }
 .team-slot:active:not(.is-walking) { transform: translate(2px, 2px); }
 
+/* The wardrobe: slot tabs along the bottom of the beast's card, and a shelf of
+   what the player owns for the open slot. */
+.wardrobe { background: var(--panel); border-top: 2px solid var(--panel-dim); }
+.wardrobe .segmented-sub { border: 0; }
+.wardrobe-shelf { display: flex; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3); overflow-x: auto; }
+
+.wardrobe-item {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  padding: 0;
+  background: var(--slate);
+  border: var(--border);
+  border-color: var(--dark);
+  overflow: hidden;
+}
+
+.wardrobe-item.is-equipped { border-color: var(--yellow); }
+.wardrobe-item:active { transform: translate(2px, 2px); }
+.wardrobe-empty { padding: var(--s3); font-size: 19px; color: var(--muted); text-align: center; }
+.wardrobe-empty a { color: var(--yellow); text-decoration: underline; }
+
 /* ---------- Walk ---------- */
 
 .ring-card { position: relative; width: min(100%, 300px); margin: 4px auto; }
@@ -733,17 +757,6 @@ input::placeholder { color: var(--slate); }
 .item-tap.is-equipped { border-color: var(--yellow); }
 .item-tap.is-equipped .owned { color: var(--yellow); }
 
-.preview {
-  position: sticky;
-  top: -14px;
-  z-index: 3;
-  width: 62%;
-  margin: 0 auto;
-  border: var(--border);
-  overflow: hidden;
-  box-shadow: var(--pop);
-}
-
 .coin-hero {
   display: flex;
   flex-direction: column;
@@ -921,6 +934,44 @@ input::placeholder { color: var(--slate); }
 }
 
 .float.is-miss { color: var(--ink); font-size: 13px; }
+.float.is-strong { color: var(--yellow); font-size: 22px; }
+
+/* Element tags, shown wherever a beast is. */
+.element { flex: none; align-self: center; padding: 3px 6px; font-family: var(--pixel); font-size: 8px; text-transform: uppercase; color: var(--dark); }
+.element.is-fire { background: var(--orange); }
+.element.is-water { background: var(--blue); color: var(--ink); }
+.element.is-nature { background: var(--lime); }
+.element.is-sky { background: var(--cyan); }
+.edge { font-size: 17px; }
+.edge.is-strong { color: var(--lime); }
+.edge.is-weak { color: var(--orange); }
+
+/* Energy: three pips, a special spends two. */
+.energy { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; height: 8px; }
+.energy i { background: var(--shadow); border: 2px solid var(--ink); }
+.energy i.is-on { background: var(--yellow); }
+
+.moves { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s2); }
+
+.move {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 84px;
+  padding: var(--s2) 2px;
+  background: var(--yellow);
+  color: var(--dark);
+  border: var(--border);
+  box-shadow: var(--pop);
+}
+
+.move .px-icon { width: 18px; height: 18px; }
+.move b { font-family: var(--pixel); font-size: 9px; text-transform: uppercase; }
+.move small { font-size: 15px; line-height: 1; color: inherit; text-wrap: balance; }
+.move:active:not(:disabled) { transform: translate(4px, 4px); box-shadow: none; }
+.move:disabled { background: var(--dither); color: var(--muted); box-shadow: none; cursor: default; }
 
 @keyframes float-up {
   from { transform: translate(-50%, 12px); }

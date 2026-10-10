@@ -7,18 +7,29 @@ import { after, before, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { GpsFilter, distanceM, bearingDeg, pathLengthM, pointAlong, stepsFromMeters } from '../public/js/geo.js';
 import { SPECIES_IDS, buddyPixels } from '../public/js/buddy.js';
+import { ELEMENT_BEATS as CLIENT_ELEMENT_BEATS } from '../public/js/elements.js';
 import { StepDetector } from '../public/js/steps.js';
 import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, buddyLine, cleanLine, stripTags,
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  COIN_PACKAGES, EGGS, MOODS, SPECIES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
+  COIN_PACKAGES, EGGS, ELEMENT_BEATS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
+  opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
 test('evolution stages follow level bands', () => {
   assert.deepEqual([1, 4, 5, 9, 10, 19, 20, 50].map(stageForLevel),
     ['egg', 'egg', 'baby', 'baby', 'teen', 'teen', 'adult', 'adult']);
+});
+
+test('the rest after a lost battle grows with level and jumps at each evolution', () => {
+  assert.equal(restAfterLoss(1), 35_000);
+  assert.equal(restAfterLoss(4), 50_000);
+  assert.equal(restAfterLoss(5), 85_000);
+  assert.equal(restAfterLoss(10), 170_000);
+  assert.equal(restAfterLoss(20), 340_000);
+  for (let level = 1; level < 30; level++) assert.ok(restAfterLoss(level + 1) > restAfterLoss(level));
 });
 
 test('upgrade costs scale with the current value', () => {
@@ -54,34 +65,102 @@ test('mood follows walking and battles, first matching rule wins', () => {
   assert.deepEqual(Object.keys(MOOD_STYLES).sort(), [...MOODS].sort());
 });
 
-test('battle: 5 rounds, one attack each, damage = attack + 0..3, dodges do nothing', () => {
-  const a = { attack: 10, evasion: 0 };
-  const b = { attack: 2, evasion: 0 };
-  const result = resolveBattle(a, b);
-  assert.equal(result.log.length, 10);
-  for (const turn of result.log) {
-    const attack = turn.attacker === 'a' ? 10 : 2;
-    assert.ok(!turn.dodged && turn.damage >= attack && turn.damage <= attack + 3);
-  }
-  assert.equal(result.winner, 'a');
-  assert.equal(result.totals.a, result.log.filter((t) => t.attacker === 'a').reduce((s, t) => s + t.damage, 0));
+// A random() that replays a fixed list of numbers, then repeats the last one.
+const sequence = (...values) => () => (values.length > 1 ? values.shift() : values[0]);
+const fighter = (attack, species = 'golem', evasion = 0) => ({ attack, evasion, species });
 
-  // random() always 0 is below any positive dodge chance, so everything misses.
-  const allMiss = resolveBattle({ attack: 5, evasion: 50 }, { attack: 5, evasion: 50 }, () => 0);
-  assert.ok(allMiss.log.every((t) => t.dodged && t.damage === 0));
-  assert.equal(allMiss.winner, null);
+test('battle: an attack does attack + 0..3, a guard halves it, both sides act each round', () => {
+  const sides = { a: fighter(10), b: fighter(2) };
+  const battle = newBattle(sides.a, sides.b);
+  assert.equal(battle.hpMax, 5 * (10 + 3));
+  // random: a's dodge roll, a's damage roll (0.99 → +3), b's dodge roll, b's damage roll (0 → +0).
+  const first = resolveRound(battle, sides, { a: 'attack', b: 'attack' }, sequence(0.5, 0.99, 0.5, 0));
+  assert.deepEqual([first.a.damage, first.b.damage], [13, 2]);
+  assert.deepEqual(battle.hp, { a: 65 - 2, b: 65 - 13 });
+  assert.deepEqual(battle.energy, { a: 1, b: 1 });
+  assert.equal(battle.round, 2);
+
+  const guarded = resolveRound(battle, sides, { a: 'attack', b: 'guard' }, sequence(0.5, 0));
+  assert.equal(guarded.a.damage, 5);
+  assert.equal(guarded.b.damage, 0);
+  assert.deepEqual(battle.energy, { a: 2, b: 3 });
+});
+
+test('battle: a special costs 2 energy, hits double, ignores dodging and is stopped by a guard', () => {
+  const sides = { a: fighter(10), b: fighter(10, 'golem', 50) };
+  const battle = newBattle(sides.a, sides.b);
+  assert.equal(canUse(battle, 'a', 'special'), false);
+  assert.equal(canUse(battle, 'a', 'dance'), false);
+  battle.energy.a = 2;
+  assert.equal(canUse(battle, 'a', 'special'), true);
+  // random() of 0 would make any attack miss a beast with evasion; a special still lands.
+  const hit = resolveRound(battle, sides, { a: 'special', b: 'attack' }, () => 0);
+  assert.deepEqual([hit.a.damage, hit.a.dodged, battle.energy.a], [20, false, 0]);
+
+  battle.energy.a = 2;
+  const blocked = resolveRound(battle, sides, { a: 'special', b: 'guard' }, () => 0);
+  assert.deepEqual([blocked.a.damage, blocked.a.blocked, battle.energy.a], [0, true, 0]);
+});
+
+test('battle: elements go water > fire > nature > sky > water', () => {
+  assert.deepEqual(ELEMENT_BEATS, CLIENT_ELEMENT_BEATS);
+  for (const species of SPECIES) assert.ok(elementOf(species) in ELEMENT_BEATS, species);
+  assert.deepEqual(['kraken', 'dragon', 'treant', 'griffin'].map(elementOf), ['water', 'fire', 'nature', 'sky']);
+  assert.equal(matchup('water', 'fire'), 'strong');
+  assert.equal(matchup('fire', 'water'), 'weak');
+  assert.equal(matchup('fire', 'sky'), 'even');
+  assert.equal(matchup('fire', 'fire'), 'even');
+
+  // Same stats, same rolls: the kraken's hit is 1.5×, the dragon's 0.75×.
+  const sides = { a: fighter(10, 'kraken'), b: fighter(10, 'dragon') };
+  const round = resolveRound(newBattle(sides.a, sides.b), sides, { a: 'attack', b: 'attack' }, () => 0.5);
+  assert.deepEqual([round.a.damage, round.a.effect, round.b.damage, round.b.effect], [18, 'strong', 9, 'weak']);
+});
+
+test('battle: ends after 5 rounds or a knockout, most HP left wins', () => {
+  const sides = { a: fighter(10), b: fighter(2) };
+  const battle = newBattle(sides.a, sides.b);
+  let rounds = 0;
+  while (!battle.over) {
+    resolveRound(battle, sides, { a: 'attack', b: opponentMove(battle) });
+    rounds++;
+  }
+  assert.ok(rounds <= 5);
+  assert.equal(battle.winner, 'a');
+
+  // Everything misses: nobody is hurt and it is a draw after five rounds.
+  const dodgers = { a: fighter(5, 'golem', 50), b: fighter(5, 'golem', 50) };
+  const quiet = newBattle(dodgers.a, dodgers.b);
+  for (let i = 0; i < 5; i++) resolveRound(quiet, dodgers, { a: 'attack', b: 'attack' }, () => 0);
+  assert.deepEqual([quiet.over, quiet.winner, quiet.round], [true, null, 5]);
+
+  const knockout = newBattle(fighter(40), fighter(1));
+  knockout.hp.b = 3;
+  resolveRound(knockout, { a: fighter(40), b: fighter(1) }, { a: 'attack', b: 'attack' }, () => 0.5);
+  assert.deepEqual([knockout.over, knockout.winner, knockout.hp.b, knockout.round], [true, 'a', 0, 1]);
 });
 
 test('battle: dodge rate is evasion / (evasion + 50)', () => {
+  const sides = { a: fighter(1, 'golem', 50), b: fighter(1, 'golem', 50) };
   let dodged = 0;
-  let turns = 0;
-  for (let i = 0; i < 4000; i++) {
-    for (const turn of resolveBattle({ attack: 1, evasion: 50 }, { attack: 1, evasion: 50 }).log) {
-      turns++;
-      if (turn.dodged) dodged++;
+  const rounds = 20000;
+  for (let i = 0; i < rounds; i++) {
+    if (resolveRound(newBattle(sides.a, sides.b), sides, { a: 'attack', b: 'guard' }).a.dodged) dodged++;
+  }
+  assert.ok(Math.abs(dodged / rounds - 0.5) < 0.02);
+});
+
+test('battle: the opponent only uses moves it can afford', () => {
+  const sides = { a: fighter(1), b: fighter(1) };
+  for (let i = 0; i < 200; i++) {
+    const battle = newBattle(sides.a, sides.b);
+    battle.hp = { a: 1e6, b: 1e6 };
+    while (!battle.over) {
+      const move = opponentMove(battle);
+      assert.ok(canUse(battle, 'b', move));
+      resolveRound(battle, sides, { a: 'attack', b: move });
     }
   }
-  assert.ok(Math.abs(dodged / turns - 0.5) < 0.02);
 });
 
 test('step detector counts a walking rhythm and ignores a still phone', () => {
@@ -184,6 +263,17 @@ async function call(method, route, body, auth = token) {
   return { status: res.status, data: await res.json() };
 }
 
+// Plays a whole battle with one move, returning the final response.
+async function fight(opponentId, auth = token, move = 'attack') {
+  rested((await call('GET', '/me', null, auth)).data.user.id);
+  const start = await call('POST', '/battles', { opponentId }, auth);
+  if (start.status !== 200) return start;
+  for (;;) {
+    const turn = await call('POST', '/battles/move', { battleId: start.data.battle.id, move }, auth);
+    if (turn.status !== 200 || turn.data.battle.over) return turn;
+  }
+}
+
 before(async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'stepbuddy-'));
   dbFile = path.join(dir, 'test.db');
@@ -198,6 +288,13 @@ before(async () => {
 });
 
 after(() => server.close());
+
+// Skips the rest after a lost battle by moving the player's battles into the past.
+function rested(userId) {
+  const db = new DatabaseSync(dbFile);
+  db.prepare('UPDATE battles SET created_at = created_at - 3600000 WHERE challenger_id = ?').run(userId);
+  db.close();
+}
 
 test('three demo buddies at different stages are seeded', async () => {
   const { data } = await call('GET', '/opponents');
@@ -372,16 +469,96 @@ test('levelling across a stage boundary evolves the buddy', async () => {
   assert.equal(last.data.evolvedTo, 'baby');
 });
 
-test('battles are recorded and the winner is paid', async () => {
+test('battles are played a move at a time, then recorded and the winner is paid', async () => {
   const before = (await call('GET', '/me')).data;
-  const { data } = await call('POST', '/battles', { opponentId: 1 });
-  assert.equal(data.battle.log.length, 10);
-  const { wins, losses, draws } = data.record;
+  const start = (await call('POST', '/battles', { opponentId: 1 })).data.battle;
+  assert.deepEqual([start.round, start.rounds, start.over], [1, 5, false]);
+  assert.deepEqual(start.hp, { a: start.hpMax, b: start.hpMax });
+  assert.equal(start.challenger.element, elementOf(before.buddy.species));
+  assert.equal(start.matchup, matchup(start.challenger.element, start.opponent.element));
+  // Nothing is recorded or paid until the battle ends.
+  assert.deepEqual((await call('GET', '/me')).data.record, before.record);
+
+  assert.equal((await call('POST', '/battles/move', { battleId: start.id, move: 'special' })).status, 400);
+  assert.equal((await call('POST', '/battles/move', { battleId: start.id, move: 'dance' })).status, 400);
+  assert.equal((await call('POST', '/battles/move', { battleId: 'nope', move: 'attack' })).status, 409);
+
+  const first = (await call('POST', '/battles/move', { battleId: start.id, move: 'guard' })).data;
+  assert.deepEqual([first.round.number, first.round.a.move, first.round.a.damage], [1, 'guard', 0]);
+  assert.equal(first.battle.energy.a, 2);
+  assert.equal(first.battle.hp.b, start.hpMax);
+
+  let last = first;
+  let rounds = 1;
+  while (!last.battle.over) {
+    const move = last.battle.energy.a >= 2 ? 'special' : 'attack';
+    last = (await call('POST', '/battles/move', { battleId: start.id, move })).data;
+    rounds++;
+  }
+  assert.ok(rounds <= 5);
+  const { wins, losses, draws } = last.record;
   assert.equal(wins + losses + draws, 1);
-  assert.equal(data.user.points, before.user.points + (data.battle.outcome === 'win' ? 5 : 0));
+  assert.equal(last.user.points, before.user.points + (last.battle.outcome === 'win' ? 5 : 0));
   const history = (await call('GET', '/battles')).data.history;
-  assert.equal(history[0].outcome, data.battle.outcome);
+  assert.equal(history[0].outcome, last.battle.outcome);
+  assert.equal((await call('POST', '/battles/move', { battleId: start.id, move: 'attack' })).status, 409);
   assert.equal((await call('POST', '/battles', { opponentId: before.user.id })).status, 400);
+});
+
+test('running away, or starting another battle, loses the one in progress', async () => {
+  const runner = (await call('POST', '/login', { username: 'runner' }, null)).data.token;
+  const first = (await call('POST', '/battles', { opponentId: 1 }, runner)).data.battle;
+  const fled = await call('POST', '/battles/forfeit', { battleId: first.id }, runner);
+  assert.deepEqual(fled.data.record, { wins: 0, losses: 1, draws: 0 });
+  // Forfeiting again, or a battle that isn't running, changes nothing.
+  assert.deepEqual((await call('POST', '/battles/forfeit', { battleId: first.id }, runner)).data.record, fled.data.record);
+
+  rested(fled.data.user.id);
+  await call('POST', '/battles', { opponentId: 1 }, runner);
+  // The battle walked away from is lost, so the next one has to wait.
+  assert.equal((await call('POST', '/battles', { opponentId: 2 }, runner)).status, 429);
+  assert.equal((await call('GET', '/me', null, runner)).data.record.losses, 2);
+});
+
+test('losing a battle you started means resting, longer for a bigger beast', async () => {
+  const login = (await call('POST', '/login', { username: 'sleepyhead' }, null)).data;
+  const [auth, userId] = [login.token, login.user.id];
+  assert.equal(login.buddy.restingUntil, null);
+  const db = new DatabaseSync(dbFile);
+  const lose = async () => {
+    const { battle } = (await call('POST', '/battles', { opponentId: 1 }, auth)).data;
+    return (await call('POST', '/battles/forfeit', { battleId: battle.id }, auth)).data;
+  };
+  const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 5000, `${actual} vs ${expected}`);
+  try {
+    const lost = await lose();
+    near(lost.buddy.restingUntil - Date.now(), restAfterLoss(1));
+    const refused = await call('POST', '/battles', { opponentId: 1 }, auth);
+    assert.equal(refused.status, 429);
+    assert.match(refused.data.error, /resting.*0:3\d/);
+    assert.equal((await call('GET', '/me', null, auth)).data.record.losses, 1);
+
+    // An evolved beast needs longer.
+    db.prepare("UPDATE buddies SET level = 12, stage = 'teen' WHERE user_id = ?").run(userId);
+    near((await call('GET', '/me', null, auth)).data.buddy.restingUntil - Date.now(), restAfterLoss(12));
+
+    // Once the rest is over the beast can fight again.
+    rested(userId);
+    assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
+    await lose();
+
+    // Being beaten as the opponent, a draw or a win costs no rest.
+    db.prepare('UPDATE battles SET challenger_id = opponent_id, opponent_id = challenger_id WHERE challenger_id = ?')
+      .run(userId);
+    assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
+    await lose();
+    db.prepare('UPDATE battles SET winner_id = NULL WHERE challenger_id = ?').run(userId);
+    assert.equal((await call('GET', '/me', null, auth)).data.buddy.restingUntil, null);
+    db.prepare('UPDATE battles SET winner_id = challenger_id WHERE challenger_id = ?').run(userId);
+    assert.equal((await call('POST', '/battles', { opponentId: 1 }, auth)).status, 200);
+  } finally {
+    db.close();
+  }
 });
 
 test('stats report distance, CO2 and a 30-day history', async () => {
@@ -616,9 +793,9 @@ test('friends: add by username, mutual, no duplicates, removable', async () => {
   assert.ok((await call('GET', '/opponents')).data.opponents.find((o) => o.username === 'mira').isFriend);
 
   // Head-to-head counts only battles between the two of us.
-  const fight = (await call('POST', '/battles', { opponentId: 1 })).data.battle.outcome;
+  const outcome = (await fight(1)).data.battle.outcome;
   const record = (await call('GET', '/friends')).data.friends[0].headToHead;
-  assert.ok(record.wins + record.losses >= (fight === 'draw' ? 0 : 1));
+  assert.ok(record.wins + record.losses >= (outcome === 'draw' ? 0 : 1));
 
   const removed = await call('POST', '/friends/remove', { userId: 1 });
   assert.deepEqual(removed.data.friends, []);

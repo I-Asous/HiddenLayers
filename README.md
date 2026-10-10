@@ -10,7 +10,7 @@ StepBuddy is a mobile-first web app (installable as a PWA) with a small Node ser
 
 | Tab | What you do there |
 |---|---|
-| **Home** | See your buddy, its mood and today's steps. Tap it to chat. |
+| **Home** | See your buddy, its mood and today's steps. Tap it to chat, and dress it from the wardrobe under it. |
 | **Walk** | Start a walk. The phone's accelerometer counts your steps while the app is open. |
 | **Map** | Watch your buddy walk on a real map of where you are, following your GPS. |
 | **Store** | Spend points on upgrades and cosmetics, and pick up coin packs. |
@@ -26,6 +26,7 @@ StepBuddy is a mobile-first web app (installable as a PWA) with a small Node ser
 ### Battles
 - Five rounds. Each buddy attacks once per round, and the higher evasion stat gives a better chance of dodging.
 - The buddy that deals the most total damage wins. A win pays **+5 Stride Points**.
+- Lose a battle you started and your buddy has to rest before the next one. The rest gets longer with every level (+5s each) and at each evolution: egg 30s, baby 1 min, teen 2 min, adult 4 min.
 - Each species throws its own punch, and every miss has its own sound effect.
 
 ### Mood

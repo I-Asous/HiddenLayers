@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { buddySvg, stageName } from '../buddy.js';
+import { ELEMENT_BEATS, ELEMENT_LABELS, elementTag, matchup, weakTo } from '../elements.js';
 import { buddySay, confetti, escapeHtml, fmt, punchSound, reducedMotion, sfx, sleep, toast } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
@@ -15,13 +16,33 @@ const segmented = (name, options, selected, extra = '') => `
     <button role="tab" aria-selected="${value === selected}" data-${name}="${value}">${label}</button>`).join('')}
   </div>`;
 
+// How the player's beast fares against this one, before they pick a fight.
+const EDGE = {
+  strong: '<span class="edge is-strong">You have the edge</span>',
+  weak: '<span class="edge is-weak">They have the edge</span>',
+  even: '',
+};
+
+// Time left as m:ss, for the rest a beast needs after losing.
+const clock = (ms) => {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+};
+const restLeft = () => (app.state.buddy.restingUntil ?? 0) - Date.now();
+
+// The Battle button, or a countdown while the player's beast is resting.
+const battleButton = (userId) => (restLeft() > 0
+  ? `<button class="btn btn-primary btn-small" disabled>Resting <span data-rest>${clock(restLeft())}</span></button>`
+  : `<button class="btn btn-primary btn-small" data-challenge="${userId}">${icons.sword}Battle</button>`);
+
 function buddyRow(o, detail, actions) {
   return `
     <li class="opponent">
       <div class="opponent-art">${buddySvg(o)}<span class="art-level">Lv ${o.level}</span></div>
       <div class="opponent-info">
         <b>${escapeHtml(o.name)}</b>
-        <span>${stageName(o)}</span>
+        <span>${stageName(o)} ${elementTag(o.element)}</span>
+        ${EDGE[matchup(app.state.buddy.element, o.element)]}
         <small>@${escapeHtml(o.username)}${detail}</small>
       </div>
       <div class="opponent-actions">${actions}</div>
@@ -57,7 +78,7 @@ export function mount(el) {
     return `${form}<ul class="opponents">${friends.map((f) => buddyRow(
       f,
       ` · you ${f.headToHead.wins}–${f.headToHead.losses}`,
-      `<button class="btn btn-primary btn-small" data-challenge="${f.userId}">${icons.sword}Battle</button>
+      `${battleButton(f.userId)}
        <button class="btn btn-ghost btn-small" data-remove="${f.userId}"
          aria-label="Remove ${escapeHtml(f.username)} from friends">Remove</button>`,
     )).join('')}</ul>`;
@@ -69,7 +90,7 @@ export function mount(el) {
     return `<ul class="opponents">${opponents.map((o) => buddyRow(
       o,
       '',
-      `<button class="btn btn-primary btn-small" data-challenge="${o.userId}">${icons.sword}Battle</button>
+      `${battleButton(o.userId)}
        ${o.isFriend
         ? '<span class="tag is-win">Friend</span>'
         : `<button class="btn btn-small btn-icon" data-add="${escapeHtml(o.username)}"
@@ -121,8 +142,11 @@ export function mount(el) {
           <span class="is-win">${record.wins} W</span><span class="is-loss">${record.losses} L</span></div>
       </header>
       ${segmented('view', { friends: 'Friends', everyone: 'Everyone', ranks: 'Ranks' }, view)}
-      ${view === 'ranks' ? '' : `<p class="hint hint-top">${escapeHtml(buddy.name)} has ${buddy.attack} attack and
-        ${buddy.evasion} evasion. Win a battle to earn 5 bonus Stride Points.</p>`}
+      ${view === 'ranks' ? '' : `<p class="hint hint-top">${escapeHtml(buddy.name)} ${elementTag(buddy.element)} has
+        ${buddy.attack} attack and ${buddy.evasion} evasion. Strong against ${ELEMENT_LABELS[ELEMENT_BEATS[buddy.element]]},
+        weak against ${ELEMENT_LABELS[weakTo(buddy.element)]}. Win a battle to earn 5 bonus Stride Points.
+        ${restLeft() > 0 ? `<span class="edge is-weak">Resting after a loss: ready in
+          <span data-rest>${clock(restLeft())}</span>.</span>` : ''}</p>`}
       ${view === 'friends' ? friendsHtml() : view === 'everyone' ? everyoneHtml() : ranksHtml()}`;
     // Keep what was being typed when a background refresh redraws the screen.
     const input = el.querySelector('#friend-name');
@@ -158,9 +182,18 @@ export function mount(el) {
   }
 
   async function challenge(opponentId) {
-    const result = await api('/battles', { method: 'POST', body: { opponentId } });
-    await playBattle(result.battle);
-    app.setState(result);
+    let battle;
+    try {
+      ({ battle } = await api('/battles', { method: 'POST', body: { opponentId } }));
+    } catch (err) {
+      // 429: the beast is resting and this screen didn't know; fetch the countdown.
+      if (err.status === 429) app.refresh().catch(() => {});
+      throw err;
+    }
+    const state = await playBattle(battle);
+    // No state comes back when the battle was lost track of; ask for it instead.
+    if (state) app.setState(state);
+    else await app.refresh();
     if (view === 'friends') refresh(); // head-to-head records changed
   }
 
@@ -214,6 +247,15 @@ export function mount(el) {
     });
   };
 
+  // Count the rest down in place, so typing in the friend box isn't disturbed,
+  // and bring the Battle buttons back once it is over.
+  const tick = setInterval(() => {
+    const counters = el.querySelectorAll('[data-rest]');
+    if (!counters.length) return;
+    if (restLeft() <= 0) return render();
+    for (const counter of counters) counter.textContent = clock(restLeft());
+  }, 1000);
+
   el.addEventListener('click', onClick);
   el.addEventListener('submit', onSubmit);
   render();
@@ -222,6 +264,7 @@ export function mount(el) {
   return {
     update: render,
     destroy() {
+      clearInterval(tick);
       el.removeEventListener('click', onClick);
       el.removeEventListener('submit', onSubmit);
     },
@@ -232,9 +275,32 @@ function fighterHtml(side, buddy, subtitle, hpMax) {
   return `
     <div class="fighter" data-side="${side}">
       <div class="fighter-name"><b>${escapeHtml(buddy.name)}</b><small>${escapeHtml(subtitle)}</small></div>
+      ${elementTag(buddy.element)}
       <div class="hp" role="img" aria-label="${escapeHtml(buddy.name)} HP"><i style="width:100%"></i><span>${hpMax}</span></div>
+      <div class="energy" role="img" aria-label="Energy 0 of 3"><i></i><i></i><i></i></div>
       <div class="fighter-art">${buddySvg(buddy, { background: false })}</div>
     </div>`;
+}
+
+const SPECIAL_COST = 2;
+const MOVES = {
+  attack: { label: 'Attack', icon: icons.sword, hint: 'Hit now' },
+  guard: { label: 'Guard', icon: icons.shield, hint: 'Half damage, +2 energy' },
+  special: { label: 'Special', icon: icons.flame, hint: 'Double hit, costs 2' },
+};
+const MATCHUP_LINES = {
+  strong: 'Your element has the edge: your hits land harder.',
+  weak: 'Their element has the edge: your hits land softer.',
+  even: 'No element has the edge here.',
+};
+
+// What one side did in a round, in words.
+function describe(action) {
+  if (action.move === 'guard') return 'guarded';
+  if (action.dodged) return 'attack missed';
+  if (action.blocked) return 'special blocked';
+  const effect = action.effect === 'strong' ? ', strong' : action.effect === 'weak' ? ', weak' : '';
+  return `${action.move} hit for ${action.damage}${effect}`;
 }
 
 const RESULT = {
@@ -250,21 +316,29 @@ const FALLBACK_LINES = {
   draw: 'So close! One more walk and we win.',
 };
 
-/** Replays the server's turn-by-turn log. Resolves when the player closes the result. */
-function playBattle(battle) {
+/**
+ * Plays a battle round by round: the player picks a move, the server answers
+ * with what both beasts did. Resolves with the server state once the player
+ * closes the result or runs away.
+ */
+function playBattle(start) {
   return new Promise((resolve) => {
+    let battle = start;
     const overlay = document.createElement('div');
     overlay.className = 'overlay arena';
     overlay.innerHTML = `
       <div class="arena-card" role="dialog" aria-modal="true" aria-label="Battle">
-        <p class="eyebrow" id="round">Round 1 of 5</p>
+        <p class="eyebrow" id="round">Round 1 of ${battle.rounds}</p>
         <div class="fighters">
           ${fighterHtml('a', battle.challenger, 'You', battle.hpMax)}
           <span class="versus">VS</span>
           ${fighterHtml('b', battle.opponent, `@${battle.opponent.username}`, battle.hpMax)}
         </div>
-        <div class="arena-result" id="result" aria-live="assertive"></div>
-        <button class="btn btn-ghost btn-block" id="skip">Skip</button>
+        <div class="arena-result" id="result" aria-live="assertive"><p>${MATCHUP_LINES[battle.matchup]}</p></div>
+        <div class="moves" id="moves">${Object.entries(MOVES).map(([move, { label, icon, hint }]) => `
+          <button class="move" data-move="${move}">${icon}<b>${label}</b><small>${hint}</small></button>`).join('')}
+        </div>
+        <button class="btn btn-ghost btn-block" id="flee">Run away (counts as a loss)</button>
       </div>`;
     document.body.append(overlay);
 
@@ -272,48 +346,102 @@ function playBattle(battle) {
       a: overlay.querySelector('[data-side="a"]'),
       b: overlay.querySelector('[data-side="b"]'),
     };
-    const hp = { a: battle.hpMax, b: battle.hpMax };
-    let skipped = reducedMotion();
-    const pause = (ms) => (skipped ? Promise.resolve() : sleep(ms));
+    const pause = (ms) => (reducedMotion() ? Promise.resolve() : sleep(ms));
+    let busy = false;
 
-    function hit(defender, turn) {
-      const el = fighters[defender];
-      hp[defender] = Math.max(0, hp[defender] - turn.damage);
-      el.querySelector('.hp i').style.width = `${(hp[defender] / battle.hpMax) * 100}%`;
-      el.querySelector('.hp span').textContent = hp[defender];
-      if (skipped) return;
-      const float = document.createElement('span');
-      float.className = `float ${turn.dodged ? 'is-miss' : ''}`;
-      float.textContent = turn.dodged ? 'MISS!' : `-${turn.damage}`;
-      el.querySelector('.fighter-art').append(float);
-      float.addEventListener('animationend', () => float.remove());
-      if (turn.dodged) {
+    function close(state) {
+      overlay.remove();
+      resolve(state);
+    }
+
+    function showHp(side, value) {
+      fighters[side].querySelector('.hp i').style.width = `${(value / battle.hpMax) * 100}%`;
+      fighters[side].querySelector('.hp span').textContent = value;
+    }
+
+    // Bars, energy and buttons, straight from the server's view of the battle.
+    function sync() {
+      for (const side of ['a', 'b']) {
+        showHp(side, battle.hp[side]);
+        const energy = fighters[side].querySelector('.energy');
+        energy.setAttribute('aria-label', `Energy ${battle.energy[side]} of 3`);
+        [...energy.children].forEach((pip, i) => pip.classList.toggle('is-on', i < battle.energy[side]));
+      }
+      for (const button of overlay.querySelectorAll('[data-move]')) {
+        button.disabled = busy || (button.dataset.move === 'special' && battle.energy.a < SPECIAL_COST);
+      }
+    }
+
+    function float(side, text, className = '') {
+      if (reducedMotion()) return;
+      const label = document.createElement('span');
+      label.className = `float ${className}`;
+      label.textContent = text;
+      fighters[side].querySelector('.fighter-art').append(label);
+      label.addEventListener('animationend', () => label.remove());
+    }
+
+    async function act(side, action, hp) {
+      const defender = side === 'a' ? 'b' : 'a';
+      if (action.move === 'guard') {
+        float(side, 'GUARD', 'is-miss');
+        return pause(450);
+      }
+      fighters[side].classList.add('is-lunging');
+      await pause(220);
+      hp[defender] = Math.max(0, hp[defender] - action.damage);
+      showHp(defender, hp[defender]);
+      if (action.dodged || action.blocked) {
+        float(defender, action.dodged ? 'MISS!' : 'BLOCKED!', 'is-miss');
         sfx('miss');
       } else {
-        sfx(punchSound(defender === 'a' ? battle.opponent : battle.challenger));
-        el.classList.add('is-hit');
-        setTimeout(() => el.classList.remove('is-hit'), 350);
+        float(defender, `-${action.damage}`, action.move === 'special' || action.effect === 'strong' ? 'is-strong' : '');
+        sfx(punchSound(side === 'a' ? battle.challenger : battle.opponent));
+        fighters[defender].classList.add('is-hit');
+        setTimeout(() => fighters[defender].classList.remove('is-hit'), 350);
       }
+      await pause(330);
+      fighters[side].classList.remove('is-lunging');
+      await pause(300);
     }
 
-    async function run() {
-      await pause(600);
-      for (const turn of battle.log) {
-        overlay.querySelector('#round').textContent = `Round ${turn.round} of 5`;
-        const defender = turn.attacker === 'a' ? 'b' : 'a';
-        const attacker = fighters[turn.attacker];
-        if (!skipped) attacker.classList.add('is-lunging');
-        await pause(220);
-        hit(defender, turn);
-        await pause(330);
-        attacker.classList.remove('is-lunging');
-        await pause(300);
+    async function play(move) {
+      if (busy) return;
+      busy = true;
+      sync();
+      let data;
+      try {
+        data = await api('/battles/move', { method: 'POST', body: { battleId: battle.id, move } });
+      } catch (err) {
+        toast(err.message, 'warn');
+        // 409: the server no longer has this battle (it restarted, or another one was started).
+        if (err.status === 409) return close(null);
+        busy = false;
+        return sync();
       }
-      finish();
+      const hp = { ...battle.hp };
+      // Guards go up first, so a blocked or softened hit makes sense when it lands.
+      const order = data.round.b.move === 'guard' && data.round.a.move !== 'guard' ? ['b', 'a'] : ['a', 'b'];
+      for (const side of order) await act(side, data.round[side], hp);
+      battle = data.battle;
+      overlay.querySelector('#result').innerHTML =
+        `<p>You: ${describe(data.round.a)}<br>Them: ${describe(data.round.b)}</p>`;
+      if (battle.over) return finish(data);
+      overlay.querySelector('#round').textContent = `Round ${battle.round} of ${battle.rounds}`;
+      busy = false;
+      sync();
     }
 
-    function finish() {
-      const result = RESULT[battle.outcome];
+    // A loss also says how long the beast now has to rest.
+    function resultFor(state) {
+      const rest = (state.buddy.restingUntil ?? 0) - Date.now();
+      if (battle.outcome !== 'loss' || rest <= 0) return RESULT[battle.outcome];
+      return { ...RESULT.loss, detail: `${escapeHtml(battle.challenger.name)} rests for ${clock(rest)}` };
+    }
+
+    function finish(state) {
+      sync();
+      const result = resultFor(state);
       overlay.querySelector('#round').textContent = 'Battle over';
       overlay.querySelector('#result').innerHTML = `
         <h2 class="is-${battle.outcome}">${result.title}</h2>
@@ -322,17 +450,18 @@ function playBattle(battle) {
         fighters[battle.outcome === 'win' ? 'a' : 'b'].classList.add('is-winner');
         fighters[battle.outcome === 'win' ? 'b' : 'a'].classList.add('is-loser');
       }
-      overlay.querySelector('#skip').remove();
+      overlay.querySelector('#moves').remove();
+      overlay.querySelector('#flee').remove();
       if (battle.outcome === 'win') sfx('win');
       else if (battle.outcome === 'loss') sfx('lose');
       // Ask for the buddy's line now so it's ready by the time the aftermath shows.
       const line = buddySay(battle.outcome);
-      pause(1400).then(() => showAftermath(line));
+      pause(1400).then(() => showAftermath(line, state));
     }
 
     // The after-battle screen: your buddy, reacting, with what it has to say.
-    function showAftermath(line) {
-      const result = RESULT[battle.outcome];
+    function showAftermath(line, state) {
+      const result = resultFor(state);
       const card = overlay.querySelector('.arena-card');
       card.classList.add('aftermath');
       card.setAttribute('aria-label', 'Battle result');
@@ -342,10 +471,7 @@ function playBattle(battle) {
         <div class="bubble aftermath-bubble is-thinking" aria-live="polite"><span class="dots">...</span></div>
         <div class="aftermath-buddy is-${battle.outcome}">${buddySvg(battle.challenger, { background: false })}</div>
         <button class="btn btn-primary btn-block" id="done">Done</button>`;
-      card.querySelector('#done').onclick = () => {
-        overlay.remove();
-        resolve();
-      };
+      card.querySelector('#done').onclick = () => close(state);
       if (battle.outcome === 'win') confetti();
       line.then((text) => {
         const bubble = card.querySelector('.aftermath-bubble');
@@ -355,9 +481,16 @@ function playBattle(battle) {
       });
     }
 
-    overlay.querySelector('#skip').onclick = () => {
-      skipped = true;
+    overlay.querySelector('#moves').addEventListener('click', (event) => {
+      const move = event.target.closest('[data-move]')?.dataset.move;
+      if (move) play(move);
+    });
+    overlay.querySelector('#flee').onclick = async () => {
+      if (busy) return;
+      busy = true;
+      sync();
+      close(await api('/battles/forfeit', { method: 'POST', body: { battleId: battle.id } }).catch(() => null));
     };
-    run();
+    sync();
   });
 }

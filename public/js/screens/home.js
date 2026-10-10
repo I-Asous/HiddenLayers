@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { SPECIES, buddySvg, stageName } from '../buddy.js';
+import { SPECIES, buddySvg, cosmeticIcon, stageName } from '../buddy.js';
 import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
@@ -34,6 +34,35 @@ function teamHtml(buddy, resting) {
     resting.slice(0, TEAM_SIZE - 1).map((beast) => slot(beast, false)).join('')}</div>`;
 }
 
+const WARDROBE_SLOTS = {
+  hat: { tab: 'Hats', name: 'hats' },
+  eyewear: { tab: 'Eyes', name: 'eyewear' },
+  accessory: { tab: 'Extras', name: 'accessories' },
+  background: { tab: 'Scenes', name: 'backgrounds' },
+};
+
+// The wardrobe sits right under the beast: pick a slot, then tap something the
+// player owns to put it on or take it off. items is null until the store answers.
+function wardrobeHtml(buddy, items, open) {
+  const tabs = Object.entries(WARDROBE_SLOTS).map(([slot, { tab, name }]) => `
+    <button role="tab" aria-selected="${slot === open}" aria-label="Wardrobe: ${name}" data-slot="${slot}">${tab}</button>`);
+  let shelf = '';
+  if (open) {
+    const owned = (items ?? []).filter((item) => item.owned && item.slot === open);
+    shelf = owned.length
+      ? `<div class="wardrobe-shelf">${owned.map((item) => {
+        const on = buddy.equipped[open] === item.id;
+        return `
+          <button class="wardrobe-item ${on ? 'is-equipped' : ''}" data-equip="${item.id}" aria-pressed="${on}"
+            aria-label="${escapeHtml(item.name)}${on ? ', wearing' : ''}">${cosmeticIcon(item)}</button>`;
+      }).join('')}</div>`
+      : `<p class="wardrobe-empty">${items === null
+        ? 'Opening the wardrobe…'
+        : `No ${WARDROBE_SLOTS[open].name} yet. <a href="#store">Visit the Store</a>`}</p>`;
+  }
+  return `<div class="wardrobe"><div class="segmented segmented-sub" role="tablist">${tabs.join('')}</div>${shelf}</div>`;
+}
+
 // An 8×8 pixel coin.
 export const pointIcon = `<svg class="point-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
   <path d="M2 0h4v1h1v1h1v4h-1v1h-1v1h-4v-1h-1v-1h-1v-4h1v-1h1z" fill="#1a1c2c"/>
@@ -43,9 +72,12 @@ export const pointIcon = `<svg class="point-icon" viewBox="0 0 8 8" shape-render
 
 export function mount(el) {
   let busy = false;
+  let items = null; // everything in the store, marked with what the player owns
+  let wardrobeSlot = null; // the wardrobe slot that is open, if any
 
   function render() {
     const { user, buddy, resting, record } = app.state;
+    const shelfScroll = el.querySelector('.wardrobe-shelf')?.scrollLeft ?? 0;
     const today = app.todaySteps;
     const speaking = app.spoken && app.spoken.until > Date.now();
     const next = NEXT_STAGE[buddy.stage];
@@ -89,6 +121,7 @@ export function mount(el) {
           </button>
         </div>
         ${evolveHtml}
+        ${wardrobeHtml(buddy, items, wardrobeSlot)}
       </section>
 
       <div class="upgrades">
@@ -97,6 +130,9 @@ export function mount(el) {
         ${upgradeButton('evasion', icons.dash, '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
       </div>
       ${teamHtml(buddy, resting)}`;
+    // Keep the shelf where it was scrolled to when trying things on.
+    const shelf = el.querySelector('.wardrobe-shelf');
+    if (shelf) shelf.scrollLeft = shelfScroll;
   }
 
   async function upgrade(type) {
@@ -141,6 +177,20 @@ export function mount(el) {
     }
   }
 
+  // Tapping what the beast already wears takes it off.
+  async function equip(id) {
+    if (busy) return;
+    busy = true;
+    try {
+      const wearing = app.state.buddy.equipped[wardrobeSlot] === id;
+      app.setState(await api('/buddy/equip', { method: 'POST', body: { slot: wardrobeSlot, itemId: wearing ? null : id } }));
+    } catch (err) {
+      toast(err.message, 'warn');
+    } finally {
+      busy = false;
+    }
+  }
+
   async function talk(button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -162,6 +212,13 @@ export function mount(el) {
     if (upgradeBtn) return upgrade(upgradeBtn.dataset.upgrade);
     const switchBtn = event.target.closest('[data-switch]');
     if (switchBtn) return switchBeast(Number(switchBtn.dataset.switch));
+    const slotBtn = event.target.closest('.wardrobe [data-slot]');
+    if (slotBtn) {
+      wardrobeSlot = slotBtn.dataset.slot === wardrobeSlot ? null : slotBtn.dataset.slot;
+      return render();
+    }
+    const equipBtn = event.target.closest('[data-equip]');
+    if (equipBtn) return equip(equipBtn.dataset.equip);
     const talkBtn = event.target.closest('#talk-btn');
     if (talkBtn && !talkBtn.disabled) return talk(talkBtn);
     if (event.target.closest('#profile-btn')) return openProfile();
@@ -204,6 +261,13 @@ export function mount(el) {
   };
   walk.addEventListener('change', onWalk);
   render();
+  api('/store').then((data) => {
+    items = data.items;
+    if (wardrobeSlot) render();
+  }).catch((err) => {
+    items = [];
+    toast(err.message, 'warn');
+  });
 
   return {
     update: render,
