@@ -11,7 +11,7 @@ import * as stats from './screens/stats.js';
 import * as store from './screens/store.js';
 import * as walkScreen from './screens/walk.js';
 
-const SCREENS = { home, walk: walkScreen, map, store, battle, stats };
+const SCREENS = { home, walk: walkScreen, map, battle, store, stats };
 // Drawn on a 12×12 pixel grid.
 const TAB_ICONS = {
   home: '<path d="M5 1h2v1h1v1h1v1h1v1h1v1h-1v5h-3v-3h-2v3h-3v-5h-1v-1h1v-1h1v-1h1v-1h1z"/>',
