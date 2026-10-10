@@ -1,5 +1,6 @@
 # StepBuddy
 
+Link to demo: https://hiddenlayers-production.up.railway.app/
 A virtual pet that grows the more you walk.
 
 You hatch a mythical buddy (a **dragon**, **phoenix** or **kraken**) and raise it with real steps. Walking earns Stride Points. Spend them to level your buddy up, sharpen its attack and evasion, and dress it in cosmetics. Then take it into battle against your friends. Your buddy has an AI-generated personality and talks back with its own voice. It gets proud when you keep a streak going and sulks when you lose two fights in a row.
