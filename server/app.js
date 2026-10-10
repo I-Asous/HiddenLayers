@@ -9,8 +9,8 @@ import {
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor,
-  upgradeCosts,
+  BATTLE_WIN_BONUS, COIN_PACKAGES, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
+  streakFor, upgradeCosts,
 } from './game.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -151,7 +151,7 @@ export async function createApp({ dbFile, dataDir }) {
     const { mood, moodUntil } = await moodContext(userId, tz);
     return {
       user: {
-        id: user.id, username: user.username, points: user.points,
+        id: user.id, username: user.username, points: user.points, coins: user.coins,
         totalSteps: user.total_steps, dailyGoal: user.daily_goal,
       },
       buddy: {
@@ -324,7 +324,10 @@ export async function createApp({ dbFile, dataDir }) {
       return state(userId, tz);
     },
 
-    'GET /api/store': async ({ userId }) => ({ items: await storeItems(userId) }),
+    'GET /api/store': async ({ userId }) => ({
+      items: await storeItems(userId),
+      coinPackages: COIN_PACKAGES,
+    }),
 
     'POST /api/store/buy': async ({ userId, body, tz }) => {
       await transaction(db, async (tx) => {
@@ -337,6 +340,15 @@ export async function createApp({ dbFile, dataDir }) {
           [userId, item.id, Date.now()]);
       });
       return { items: await storeItems(userId), ...await state(userId, tz) };
+    },
+
+    'POST /api/store/buy-coins': async ({ userId, body, tz }) => {
+      const pack = COIN_PACKAGES.find(({ id }) => id === body.packageId);
+      if (!pack) throw new HttpError(404, 'No such coin package');
+      await transaction(db, async (tx) => {
+        await tx.run('UPDATE users SET coins = coins + ? WHERE id = ?', [pack.coins, userId]);
+      });
+      return { purchased: pack, ...await state(userId, tz) };
     },
 
     'GET /api/opponents': async ({ userId }) => ({
