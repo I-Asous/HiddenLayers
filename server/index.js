@@ -15,7 +15,7 @@ console.log(`db: ${server.dbLabel}`);
 
 server.on('error', (err) => {
   if (err.code !== 'EADDRINUSE') throw err;
-  console.error(`Port ${PORT} is already in use — StepBuddy may already be running in another terminal.`);
+  console.error(`Port ${PORT} is already in use — Wanderling may already be running in another terminal.`);
   console.error(`Stop that one (Ctrl+C there), or start this one elsewhere: PORT=${PORT + 1} npm start`);
   process.exit(1);
 });

@@ -363,7 +363,7 @@ const PG_SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS map_visible INTEGER NOT NULL DEFAULT 1;
 `;
 
-// Any number for pg_advisory_xact_lock; all StepBuddy transactions share it.
+// Any number for pg_advisory_xact_lock; all Wanderling transactions share it.
 const TX_LOCK = 7_833_289;
 
 // Returns null (after one warning) if Tiger Data can't be reached within 5s.

@@ -71,7 +71,7 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
         </label>`;
   root.innerHTML = `
     <main class="login">
-      <h1>StepBuddy</h1>
+      <h1>Wanderling</h1>
       <p>${LOGIN_INTRO[mode]}</p>
       <form id="login-form">
         ${mode === 'beast' ? beastFields : usernameField}
@@ -202,7 +202,7 @@ async function boot() {
     await app.refresh();
   } catch (err) {
     if (err.status === 401) return; // handleSignedOut already showed the login
-    root.innerHTML = `<main class="login"><h1>StepBuddy</h1><p>Can't reach the server. Check your connection.</p>
+    root.innerHTML = `<main class="login"><h1>Wanderling</h1><p>Can't reach the server. Check your connection.</p>
       <button class="btn btn-primary" onclick="location.reload()">Try again</button></main>`;
     return;
   }
