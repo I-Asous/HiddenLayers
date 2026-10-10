@@ -79,9 +79,35 @@ audio.addEventListener('ended', () => {
   if (audio.src !== SILENCE) finished();
 });
 
+// Sound effects get their own elements so they never cut off the buddy's voice.
+const SFX_VOLUME = 0.4;
+const SOUNDS = Object.fromEntries(['punch', 'punch2', 'punch3', 'miss', 'win', 'lose'].map((name) => {
+  const el = new Audio(`/sounds/${name}.mp3`);
+  el.preload = 'auto';
+  el.volume = SFX_VOLUME;
+  return [name, el];
+}));
+
+// Each species throws its own punch.
+const PUNCH_BY_SPECIES = { dragon: 'punch', phoenix: 'punch2', kraken: 'punch3' };
+export const punchSound = (buddy) => PUNCH_BY_SPECIES[buddy.species] ?? 'punch';
+
+/** Plays a sound effect (see SOUNDS) from the start. Never throws. */
+export function sfx(name) {
+  const el = SOUNDS[name];
+  if (!el) return;
+  el.currentTime = 0;
+  el.play().catch(() => {});
+}
+
 addEventListener('pointerdown', () => {
   audio.src = SILENCE;
   audio.play().catch(() => {});
+  // Same iOS unlock for the effects: play each once, muted, inside the tap.
+  for (const el of Object.values(SOUNDS)) {
+    el.muted = true;
+    el.play().then(() => { el.pause(); el.currentTime = 0; el.muted = false; }, () => { el.muted = false; });
+  }
 }, { once: true, capture: true });
 
 function browserSpeak(text) {

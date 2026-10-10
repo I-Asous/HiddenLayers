@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { buddySvg, stageName } from '../buddy.js';
-import { buddySay, confetti, escapeHtml, fmt, reducedMotion, sleep, toast } from '../fx.js';
+import { buddySay, confetti, escapeHtml, fmt, punchSound, reducedMotion, sfx, sleep, toast } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
 
@@ -287,7 +287,10 @@ function playBattle(battle) {
       float.textContent = turn.dodged ? 'MISS!' : `-${turn.damage}`;
       el.querySelector('.fighter-art').append(float);
       float.addEventListener('animationend', () => float.remove());
-      if (!turn.dodged) {
+      if (turn.dodged) {
+        sfx('miss');
+      } else {
+        sfx(punchSound(defender === 'a' ? battle.opponent : battle.challenger));
         el.classList.add('is-hit');
         setTimeout(() => el.classList.remove('is-hit'), 350);
       }
@@ -320,6 +323,8 @@ function playBattle(battle) {
         fighters[battle.outcome === 'win' ? 'b' : 'a'].classList.add('is-loser');
       }
       overlay.querySelector('#skip').remove();
+      if (battle.outcome === 'win') sfx('win');
+      else if (battle.outcome === 'loss') sfx('lose');
       // Ask for the buddy's line now so it's ready by the time the aftermath shows.
       const line = buddySay(battle.outcome);
       pause(1400).then(() => showAftermath(line));
