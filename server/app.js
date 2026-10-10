@@ -9,7 +9,7 @@ import {
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, COIN_PACKAGES, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
+  BATTLE_WIN_BONUS, COIN_PACKAGES, EGGS, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
   streakFor, upgradeCosts,
 } from './game.js';
 
@@ -27,6 +27,13 @@ const MIME = {
   '.glb': 'model/gltf-binary',
 };
 const MAX_SESSION_STEPS = 200_000;
+
+// Everything that makes a beast itself, and so moves with it when the player
+// switches which one they walk with.
+const BUDDY_COLUMNS = [
+  'name', 'species', 'level', 'attack', 'evasion', 'xp', 'stage', 'hat', 'eyewear', 'accessory', 'background',
+  'personality',
+];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -158,6 +165,8 @@ export async function createApp({ dbFile, dataDir }) {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
         personality: traitsOf(buddy), mood, moodUntil,
       },
+      resting: (await db.all('SELECT * FROM resting_buddies WHERE user_id = ? ORDER BY id', [userId]))
+        .map((b) => ({ id: b.id, ...publicBuddy(b) })),
       todaySteps: (await stepsByDay(db, userId, tz)).get(today) ?? 0,
       record: await record(userId),
     };
@@ -172,6 +181,20 @@ export async function createApp({ dbFile, dataDir }) {
   async function spendPoints(tx, userId, cost) {
     const { changes } = await tx.run('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?', [cost, userId, cost]);
     if (changes !== 1) throw new HttpError(402, 'Not enough Stride Points');
+  }
+
+  // Diamonds are the coins column.
+  async function spendDiamonds(tx, userId, cost) {
+    const { changes } = await tx.run('UPDATE users SET coins = coins - ? WHERE id = ? AND coins >= ?', [cost, userId, cost]);
+    if (changes !== 1) throw new HttpError(402, 'Not enough diamonds');
+  }
+
+  async function storeEggs(userId, q = db) {
+    const owned = new Set([
+      (await getBuddy(userId, q)).species,
+      ...(await q.all('SELECT species FROM resting_buddies WHERE user_id = ?', [userId])).map((b) => b.species),
+    ]);
+    return EGGS.map((egg) => ({ ...egg, owned: owned.has(egg.species) }));
   }
 
   function validUsername(value) {
@@ -191,7 +214,8 @@ export async function createApp({ dbFile, dataDir }) {
     'POST /api/login': async ({ body, tz }) => {
       const username = validUsername(body.username);
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
-      const species = SPECIES.includes(body.species) ? body.species : SPECIES[0];
+      // Nobody picks their beast: every new player is handed a random egg.
+      const species = SPECIES[Math.floor(Math.random() * SPECIES.length)];
       // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
       const preset = presetById(body.personality);
       const token = randomBytes(24).toString('hex');
@@ -338,8 +362,29 @@ export async function createApp({ dbFile, dataDir }) {
       return state(userId, tz);
     },
 
+    // Swaps the buddy the player walks with for one of their resting beasts.
+    'POST /api/buddy/switch': async ({ userId, body, tz }) => {
+      if (!Number.isInteger(body.id)) throw new HttpError(400, 'Unknown beast');
+      await transaction(db, async (tx) => {
+        const next = await tx.get('SELECT * FROM resting_buddies WHERE id = ? AND user_id = ?', [body.id, userId]);
+        if (!next) throw new HttpError(404, 'You don\'t have that beast');
+        const active = await getBuddy(userId, tx);
+        const assignments = BUDDY_COLUMNS.map((column) => `${column} = ?`).join(', ');
+        await tx.run(`UPDATE resting_buddies SET ${assignments} WHERE id = ?`,
+          [...BUDDY_COLUMNS.map((column) => active[column]), next.id]);
+        await tx.run(`UPDATE buddies SET ${assignments} WHERE user_id = ?`,
+          [...BUDDY_COLUMNS.map((column) => next[column]), userId]);
+        // Lines and memories belong to the beast that was just put to rest.
+        await tx.run('DELETE FROM ready_lines WHERE user_id = ?', [userId]);
+        await tx.run('DELETE FROM buddy_memory WHERE user_id = ?', [userId]);
+      });
+      ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
+      return state(userId, tz);
+    },
+
     'GET /api/store': async ({ userId }) => ({
       items: await storeItems(userId),
+      eggs: await storeEggs(userId),
       coinPackages: COIN_PACKAGES,
     }),
 
@@ -354,6 +399,21 @@ export async function createApp({ dbFile, dataDir }) {
           [userId, item.id, Date.now()]);
       });
       return { items: await storeItems(userId), ...await state(userId, tz) };
+    },
+
+    // A bought egg joins the player's resting beasts until they switch to it.
+    'POST /api/store/buy-egg': async ({ userId, body, tz }) => {
+      const egg = EGGS.find(({ species }) => species === body.species);
+      if (!egg) throw new HttpError(404, 'No such egg');
+      await transaction(db, async (tx) => {
+        if ((await storeEggs(userId, tx)).find(({ species }) => species === egg.species).owned) {
+          throw new HttpError(409, 'You already have that beast');
+        }
+        await (egg.currency === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, egg.price);
+        const name = egg.species[0].toUpperCase() + egg.species.slice(1);
+        await tx.run('INSERT INTO resting_buddies (user_id, name, species) VALUES (?, ?, ?)', [userId, name, egg.species]);
+      });
+      return { eggs: await storeEggs(userId), ...await state(userId, tz) };
     },
 
     'POST /api/store/buy-coins': async ({ userId, body, tz }) => {

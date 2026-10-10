@@ -5,7 +5,12 @@ export const DEFAULT_DAILY_GOAL = 6000;
 export const BATTLE_ROUNDS = 5;
 export const BATTLE_WIN_BONUS = 5;
 export const SLOTS = ['hat', 'eyewear', 'accessory', 'background'];
-export const SPECIES = ['dragon', 'phoenix', 'kraken'];
+// Must match the sprites in public/js/buddy.js; the first is the default.
+export const SPECIES = [
+  'dragon', 'phoenix', 'kraken', 'unicorn', 'pegasus', 'griffin', 'hydra', 'cerberus', 'yeti', 'kitsune', 'minotaur',
+  'cyclops', 'golem', 'sphinx', 'basilisk', 'manticore', 'thunderbird', 'jackalope', 'gargoyle', 'treant', 'djinn',
+  'kappa', 'fenrir',
+];
 
 export function stageForLevel(level) {
   if (level >= 20) return 'adult';
@@ -104,6 +109,17 @@ export const COSMETICS = [
   { id: 'bg-city', slot: 'background', name: 'City', price: 30 },
   { id: 'bg-space', slot: 'background', name: 'Space', price: 50 },
 ];
+
+// Eggs sold in the store, one per beast added after the first three. Common and
+// uncommon eggs cost Stride Points; rare and legendary ones cost diamonds.
+const EGG_TIERS = {
+  common: { currency: 'points', price: 80, species: ['jackalope', 'kappa', 'golem', 'treant', 'yeti', 'kitsune'] },
+  uncommon: { currency: 'points', price: 200, species: ['minotaur', 'cyclops', 'gargoyle', 'pegasus', 'griffin', 'basilisk'] },
+  rare: { currency: 'diamonds', price: 80, species: ['unicorn', 'sphinx', 'manticore', 'djinn'] },
+  legendary: { currency: 'diamonds', price: 250, species: ['hydra', 'cerberus', 'thunderbird', 'fenrir'] },
+};
+export const EGGS = Object.entries(EGG_TIERS).flatMap(([rarity, { currency, price, species }]) =>
+  species.map((id) => ({ species: id, rarity, currency, price })));
 
 export const COIN_PACKAGES = [
   { id: 'starter', name: 'Starter Stack', coins: 100, priceCents: 99 },

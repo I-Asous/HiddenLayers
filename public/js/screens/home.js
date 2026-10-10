@@ -19,6 +19,21 @@ function upgradeButton(type, icon, label, detail, cost, points) {
     </button>`;
 }
 
+const TEAM_SIZE = 6;
+
+// The player's beasts, the one walking with them first. Tapping another swaps to it.
+function teamHtml(buddy, resting) {
+  const slot = (beast, walking) => `
+    <button class="team-slot ${walking ? 'is-walking' : ''}" ${walking ? 'disabled' : `data-switch="${beast.id}"`}
+      aria-pressed="${walking}" aria-label="${escapeHtml(beast.name)}, ${stageName(beast)}, level ${beast.level}${
+        walking ? ', walking with you' : ''}">
+      ${buddySvg(beast, { background: false })}
+      <span>Lv ${beast.level}</span>
+    </button>`;
+  return `<div class="team">${slot(buddy, true)}${
+    resting.slice(0, TEAM_SIZE - 1).map((beast) => slot(beast, false)).join('')}</div>`;
+}
+
 // An 8×8 pixel coin.
 export const pointIcon = `<svg class="point-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
   <path d="M2 0h4v1h1v1h1v4h-1v1h-1v1h-4v-1h-1v-1h-1v-4h1v-1h1z" fill="#1a1c2c"/>
@@ -30,7 +45,7 @@ export function mount(el) {
   let busy = false;
 
   function render() {
-    const { user, buddy, record } = app.state;
+    const { user, buddy, resting, record } = app.state;
     const today = app.todaySteps;
     const speaking = app.spoken && app.spoken.until > Date.now();
     const next = NEXT_STAGE[buddy.stage];
@@ -80,7 +95,8 @@ export function mount(el) {
         ${upgradeButton('level', icons.arrowUp, 'Level Up', `Lv ${buddy.level} → ${buddy.level + 1}`, buddy.costs.level, user.points)}
         ${upgradeButton('attack', icons.sword, '+1 Attack', `${buddy.attack} → ${buddy.attack + 1}`, buddy.costs.attack, user.points)}
         ${upgradeButton('evasion', icons.dash, '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
-      </div>`;
+      </div>
+      ${teamHtml(buddy, resting)}`;
   }
 
   async function upgrade(type) {
@@ -112,6 +128,19 @@ export function mount(el) {
     }
   }
 
+  async function switchBeast(id) {
+    if (busy) return;
+    busy = true;
+    try {
+      app.setState(await api('/buddy/switch', { method: 'POST', body: { id } }));
+      toast(`${app.state.buddy.name} is walking with you now.`, 'good');
+    } catch (err) {
+      toast(err.message, 'warn');
+    } finally {
+      busy = false;
+    }
+  }
+
   async function talk(button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -131,6 +160,8 @@ export function mount(el) {
   const onClick = (event) => {
     const upgradeBtn = event.target.closest('[data-upgrade]');
     if (upgradeBtn) return upgrade(upgradeBtn.dataset.upgrade);
+    const switchBtn = event.target.closest('[data-switch]');
+    if (switchBtn) return switchBeast(Number(switchBtn.dataset.switch));
     const talkBtn = event.target.closest('#talk-btn');
     if (talkBtn && !talkBtn.disabled) return talk(talkBtn);
     if (event.target.closest('#profile-btn')) return openProfile();

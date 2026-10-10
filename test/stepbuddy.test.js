@@ -6,13 +6,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, before, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { GpsFilter, distanceM, bearingDeg, pathLengthM, pointAlong, stepsFromMeters } from '../public/js/geo.js';
+import { SPECIES_IDS, buddyPixels } from '../public/js/buddy.js';
 import { StepDetector } from '../public/js/steps.js';
 import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, buddyLine, cleanLine, stripTags,
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  COIN_PACKAGES, MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
+  COIN_PACKAGES, EGGS, MOODS, SPECIES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
 test('evolution stages follow level bands', () => {
@@ -156,6 +157,17 @@ test('walking a path point by point covers its whole length', () => {
   assert.deepEqual(pointAlong(path, length + 500), path.at(-1));
 });
 
+test('every beast the server accepts has artwork, and the other way round', () => {
+  assert.deepEqual([...SPECIES].sort(), [...SPECIES_IDS].sort());
+  assert.equal(SPECIES.length, 23);
+  for (const species of SPECIES) {
+    for (const stage of ['egg', 'baby', 'teen', 'adult']) {
+      const equipped = { hat: 'wizard-hat', eyewear: 'monocle', accessory: 'cape' };
+      assert.equal(buddyPixels({ species, stage, equipped }).length, 32);
+    }
+  }
+});
+
 // ---------- API ----------
 
 let server;
@@ -178,8 +190,10 @@ before(async () => {
   server = await createApp({ dbFile, dataDir: dir });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}/api`;
-  const login = await call('POST', '/login', { username: 'walker', buddyName: 'Nib', species: 'kraken' }, null);
-  assert.equal(login.data.buddy.species, 'kraken');
+  const login = await call('POST', '/login', { username: 'walker', buddyName: 'Nib', species: 'hamster' }, null);
+  // The beast is a random egg, whatever the request asks for.
+  assert.ok(SPECIES.includes(login.data.buddy.species));
+  assert.equal(login.data.buddy.stage, 'egg');
   token = login.data.token;
 });
 
@@ -195,8 +209,11 @@ test('signing in again returns the same account', async () => {
   const again = await call('POST', '/login', { username: 'WALKER' }, null);
   assert.equal(again.data.buddy.name, 'Nib');
 
-  const unknown = await call('POST', '/login', { username: 'newbie', species: 'hamster' }, null);
-  assert.equal(unknown.data.buddy.species, 'dragon');
+  const eggs = new Set();
+  for (let i = 0; i < 40; i++) {
+    eggs.add((await call('POST', '/login', { username: `newbie${i}`, species: 'dragon' }, null)).data.buddy.species);
+  }
+  assert.ok(eggs.size > 1);
 });
 
 test('the login screen can ask to only sign in or only sign up', async () => {
@@ -209,8 +226,8 @@ test('the login screen can ask to only sign in or only sign up', async () => {
   assert.equal((await call('GET', '/username?name=Walker', null, null)).data.available, false);
   assert.equal((await call('GET', '/username?name=no%20spaces', null, null)).status, 400);
 
-  const created = await call('POST', '/login', { username: 'fresh', buddyName: 'Ash', species: 'phoenix', mode: 'signup' }, null);
-  assert.equal(created.data.buddy.species, 'phoenix');
+  const created = await call('POST', '/login', { username: 'fresh', buddyName: 'Ash', mode: 'signup' }, null);
+  assert.equal(created.data.buddy.name, 'Ash');
   const back = await call('POST', '/login', { username: 'fresh', mode: 'login' }, null);
   assert.equal(back.data.buddy.name, 'Ash');
 });
@@ -293,6 +310,57 @@ test('store: coin packages credit the wallet without trusting the client amount'
   assert.equal(purchase.data.purchased.coins, COIN_PACKAGES[0].coins);
   assert.equal(purchase.data.user.coins, before + COIN_PACKAGES[0].coins);
   assert.equal((await call('POST', '/store/buy-coins', { packageId: 'unknown' })).status, 404);
+});
+
+test('eggs: rarity sets the currency, a bought egg rests until switched to', async () => {
+  assert.equal(EGGS.length, 20);
+  for (const egg of EGGS) {
+    assert.ok(SPECIES.includes(egg.species));
+    assert.equal(egg.currency, ['rare', 'legendary'].includes(egg.rarity) ? 'diamonds' : 'points');
+  }
+  const signup = await call('POST', '/login', { username: 'breeder', buddyName: 'First' }, null);
+  const auth = signup.data.token;
+  const first = signup.data.buddy.species;
+  const store = (await call('GET', '/store', null, auth)).data;
+  assert.equal(store.eggs.length, 20);
+  assert.equal(store.eggs.filter((egg) => egg.owned).length, EGGS.some((egg) => egg.species === first) ? 1 : 0);
+
+  const forPoints = EGGS.find((egg) => egg.currency === 'points' && egg.species !== first);
+  const forDiamonds = EGGS.find((egg) => egg.currency === 'diamonds' && egg.species !== first);
+  assert.equal((await call('POST', '/store/buy-egg', { species: forPoints.species }, auth)).status, 402);
+  assert.equal((await call('POST', '/store/buy-egg', { species: forDiamonds.species }, auth)).status, 402);
+  assert.equal((await call('POST', '/store/buy-egg', { species: 'dragon' }, auth)).status, 404);
+
+  await call('POST', '/steps/sync', { sessionId: 'breeder-walk', total: forPoints.price * 100 }, auth);
+  await call('POST', '/store/buy-coins', { packageId: COIN_PACKAGES.at(-1).id }, auth);
+  const before = (await call('GET', '/me', null, auth)).data.user;
+
+  const bought = await call('POST', '/store/buy-egg', { species: forPoints.species }, auth);
+  assert.equal(bought.data.user.points, before.points - forPoints.price);
+  assert.equal(bought.data.user.coins, before.coins);
+  assert.equal(bought.data.eggs.find((egg) => egg.species === forPoints.species).owned, true);
+  assert.equal(bought.data.buddy.species, first);
+  assert.deepEqual(bought.data.resting.map((b) => [b.species, b.stage, b.level]), [[forPoints.species, 'egg', 1]]);
+  assert.equal((await call('POST', '/store/buy-egg', { species: forPoints.species }, auth)).status, 409);
+
+  const gem = await call('POST', '/store/buy-egg', { species: forDiamonds.species }, auth);
+  assert.equal(gem.data.user.coins, before.coins - forDiamonds.price);
+  assert.equal(gem.data.user.points, bought.data.user.points);
+  assert.equal(gem.data.resting.length, 2);
+
+  // Switching swaps the two beasts whole: the first one keeps its name and rests.
+  const restingId = gem.data.resting[0].id;
+  const swapped = await call('POST', '/buddy/switch', { id: restingId }, auth);
+  assert.equal(swapped.data.buddy.species, forPoints.species);
+  assert.deepEqual(swapped.data.resting.map((b) => b.name).sort(), ['First', gem.data.resting[1].name].sort());
+  const back = await call('POST', '/buddy/switch', { id: restingId }, auth);
+  assert.equal(back.data.buddy.name, 'First');
+  assert.equal(back.data.buddy.species, first);
+
+  assert.equal((await call('POST', '/buddy/switch', { id: 999999 }, auth)).status, 404);
+  assert.equal((await call('POST', '/buddy/switch', { id: restingId }, null)).status, 401);
+  // Another player's beast can't be taken.
+  assert.equal((await call('POST', '/buddy/switch', { id: restingId })).status, 404);
 });
 
 test('levelling across a stage boundary evolves the buddy', async () => {

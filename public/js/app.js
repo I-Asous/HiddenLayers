@@ -1,5 +1,4 @@
 import { api, handleSignedOut, hasToken, setToken } from './api.js';
-import { SPECIES, buddySvg } from './buddy.js';
 import { toast } from './fx.js';
 import { app } from './state.js';
 import { walk } from './steps.js';
@@ -47,12 +46,12 @@ const escapeAttr = (value) => value.replace(/[^A-Za-z0-9_]/g, '');
 const LOGIN_INTRO = {
   login: 'Welcome back! Your buddy is waiting.',
   signup: 'Hatch a mythical beast and raise it with every step you take.',
-  beast: 'Now choose the beast you will raise.',
+  beast: 'A mystery egg is waiting for you. Walk to find out what hatches!',
 };
 
 // "login" asks returning players for just a username. New players get two
-// steps: "signup" picks a username that nobody has yet, then "beast" chooses
-// and names their beast.
+// steps: "signup" picks a username that nobody has yet, then "beast" names the
+// buddy that will hatch from their random egg.
 function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUsername()) {
   current?.screen.destroy();
   current = null;
@@ -64,15 +63,6 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
         </label>`;
   const beastFields = `
         <p class="hint hint-top">Username: ${username}</p>
-        <fieldset class="species">
-          <legend>Choose your beast</legend>
-          ${Object.entries(SPECIES).map(([id, species], i) => `
-            <label class="species-option">
-              <input type="radio" name="species" value="${id}" ${i === 0 ? 'checked' : ''}>
-              ${buddySvg({ species: id, stage: 'adult' }, { background: false, className: 'is-idle' })}
-              <span>${species.name}</span>
-            </label>`).join('')}
-        </fieldset>
         <label>Name your buddy
           <input name="buddyName" maxlength="16" autocomplete="off" placeholder="Buddy">
         </label>
@@ -123,7 +113,6 @@ function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUs
           mode: mode === 'login' ? 'login' : 'signup',
           username: typedUsername(),
           buddyName: data.get('buddyName'),
-          species: data.get('species'),
           personality: data.get('personality'),
         },
       });

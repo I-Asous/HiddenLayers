@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { buddySvg, cosmeticIcon } from '../buddy.js';
+import { SPECIES, buddySvg, cosmeticIcon, stageName } from '../buddy.js';
 import { escapeHtml, fmt, toast } from '../fx.js';
 import { app } from '../state.js';
 import { pointIcon } from './home.js';
@@ -13,15 +13,55 @@ const DEFAULT_DIAMOND_PACKAGES = [
   { id: 'diamonds_750', name: 'Diamond Vault', diamonds: 750, priceCents: 999, popular: false },
 ];
 
+const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds', wardrobe: 'Wardrobe', beasts: 'Beasts' };
+
 export function mount(el) {
   let view = 'store';
   let items = null;
+  let eggs = null;
   let diamondPackages = null;
   let busy = false;
 
+  // Common and uncommon eggs cost Stride Points; rare and legendary ones cost diamonds.
+  function eggsHtml() {
+    return `<div class="grid">${eggs.map((egg) => {
+      const paidInDiamonds = egg.currency === 'diamonds';
+      const balance = paidInDiamonds ? app.diamonds : app.state.user.points;
+      const icon = paidInDiamonds ? diamondIcon : pointIcon;
+      const name = SPECIES[egg.species].titles.egg;
+      return `
+      <article class="item ${egg.owned ? 'is-owned' : ''}">
+        <div class="item-art">${buddySvg({ species: egg.species, stage: 'egg' }, { background: false })}${egg.owned
+          ? '<span class="stamp">Owned</span>'
+          : `<span class="price-tag">${icon}${fmt(egg.price)}</span>`}</div>
+        <b>${name}</b>
+        <span class="rarity" data-rarity="${egg.rarity}">${egg.rarity}</span>${egg.owned
+          ? '<span class="owned">With your beasts</span>'
+          : `<button class="btn btn-small ${balance < egg.price ? 'is-short' : 'btn-primary'}"
+              data-buy-egg="${egg.species}" aria-label="Buy ${name} for ${egg.price} ${paidInDiamonds ? 'diamonds' : 'points'}">
+              ${balance < egg.price ? `Need ${fmt(egg.price - balance)}` : 'Buy'}</button>`}
+      </article>`;
+    }).join('')}</div>`;
+  }
+
+  function beastsHtml() {
+    const { buddy, resting } = app.state;
+    const tile = (beast, walking) => `
+      <button class="item item-tap ${walking ? 'is-equipped' : ''}" ${walking ? 'disabled' : `data-switch="${beast.id}"`}
+        aria-pressed="${walking}">
+        <div class="item-art">${buddySvg(beast, { background: false })}</div>
+        <b>${escapeHtml(beast.name)}</b>
+        <span class="owned">${stageName(beast)} · Lv ${beast.level}</span>
+        <span class="owned">${walking ? 'Walking with you' : 'Tap to walk with'}</span>
+      </button>`;
+    return `
+      <div class="grid">${tile(buddy, true)}${resting.map((beast) => tile(beast, false)).join('')}</div>
+      ${resting.length ? '' : '<p class="empty">Buy an egg in the Store to raise another beast.</p>'}`;
+  }
+
   function storeHtml() {
     const { points } = app.state.user;
-    return `<div class="grid">${items.map((item) => `
+    return `<h3>Eggs</h3>${eggsHtml()}<h3>Cosmetics</h3><div class="grid">${items.map((item) => `
       <article class="item ${item.owned ? 'is-owned' : ''}">
         <div class="item-art">${cosmeticIcon(item)}${item.owned
           ? '<span class="stamp">Owned</span>'
@@ -80,7 +120,8 @@ export function mount(el) {
 
   function render() {
     if (!app.state?.user) return;
-    const title = view === 'store' ? 'Store' : view === 'diamonds' ? 'Diamonds' : 'Wardrobe';
+    const title = VIEW_TITLES[view];
+    const html = { store: storeHtml, diamonds: diamondsHtml, wardrobe: wardrobeHtml, beasts: beastsHtml };
     el.innerHTML = `
       <header class="topbar">
         <h1>${title}</h1>
@@ -90,8 +131,9 @@ export function mount(el) {
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
         <button role="tab" aria-selected="${view === 'diamonds'}" data-view="diamonds">Diamonds</button>
         <button role="tab" aria-selected="${view === 'wardrobe'}" data-view="wardrobe">Wardrobe</button>
+        <button role="tab" aria-selected="${view === 'beasts'}" data-view="beasts">Beasts</button>
       </div>
-      ${items === null || diamondPackages === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : view === 'diamonds' ? diamondsHtml() : wardrobeHtml()}`;
+      ${items === null || diamondPackages === null ? '<p class="empty">Loading…</p>' : html[view]()}`;
   }
 
   async function buy(id) {
@@ -105,6 +147,25 @@ export function mount(el) {
     items = result.items;
     app.setState(result);
     toast(`${item.name} is yours! Find it in your Wardrobe.`, 'good');
+  }
+
+  async function buyEgg(species) {
+    const egg = eggs.find((e) => e.species === species);
+    const paidInDiamonds = egg.currency === 'diamonds';
+    const balance = paidInDiamonds ? app.diamonds : app.state.user.points;
+    if (balance < egg.price) {
+      toast(`You need ${fmt(egg.price - balance)} more ${paidInDiamonds ? 'diamonds' : 'Stride Points'}.`, 'warn');
+      return;
+    }
+    const result = await api('/store/buy-egg', { method: 'POST', body: { species } });
+    eggs = result.eggs;
+    app.setState(result);
+    toast(`${SPECIES[species].titles.egg} is yours! Find it under Beasts.`, 'good');
+  }
+
+  async function switchBeast(id) {
+    app.setState(await api('/buddy/switch', { method: 'POST', body: { id } }));
+    toast(`${app.state.buddy.name} is walking with you now.`, 'good');
   }
 
   async function equip(id, slot) {
@@ -142,12 +203,16 @@ export function mount(el) {
       return render();
     }
     const buyBtn = event.target.closest('[data-buy]');
+    const eggBtn = event.target.closest('[data-buy-egg]');
+    const switchBtn = event.target.closest('[data-switch]');
     const equipBtn = event.target.closest('[data-equip]');
     const diamondsBtn = event.target.closest('[data-buy-diamonds]');
-    if ((!buyBtn && !equipBtn && !diamondsBtn) || busy) return;
+    if ((!buyBtn && !eggBtn && !switchBtn && !equipBtn && !diamondsBtn) || busy) return;
     busy = true;
     try {
       if (buyBtn) await buy(buyBtn.dataset.buy);
+      else if (eggBtn) await buyEgg(eggBtn.dataset.buyEgg);
+      else if (switchBtn) await switchBeast(Number(switchBtn.dataset.switch));
       else if (diamondsBtn) await buyDiamonds(diamondsBtn.dataset.buyDiamonds);
       else await equip(equipBtn.dataset.equip, equipBtn.dataset.slot);
     } catch (err) {
@@ -166,6 +231,7 @@ export function mount(el) {
   api('/store')
     .then((data) => {
       items = data.items || [];
+      eggs = data.eggs || [];
       const rawPackages = data.diamondPackages || data.coinPackages || DEFAULT_DIAMOND_PACKAGES;
       diamondPackages = rawPackages.map((p) => ({
         ...p,
@@ -176,6 +242,7 @@ export function mount(el) {
     })
     .catch((err) => {
       items = items || [];
+      eggs = eggs || [];
       diamondPackages = DEFAULT_DIAMOND_PACKAGES;
       render();
       toast(err.message, 'warn');
