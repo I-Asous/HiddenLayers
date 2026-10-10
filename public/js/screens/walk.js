@@ -1,4 +1,6 @@
+import { buddySvg } from '../buddy.js';
 import { fmt, toast } from '../fx.js';
+import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { pointIcon } from './home.js';
@@ -12,7 +14,7 @@ export function mount(el) {
   el.innerHTML = `
     <header class="topbar">
       <h1>Walk Mode</h1>
-      <div class="balance">${pointIcon}<b id="walk-points"></b></div>
+      <div class="balance" id="walk-balance">${pointIcon}<b id="walk-points"></b></div>
     </header>
 
     <section class="ring-card">
@@ -20,17 +22,20 @@ export function mount(el) {
         <circle cx="110" cy="110" r="${RADIUS}" class="ring-track"/>
         <circle cx="110" cy="110" r="${RADIUS}" class="ring-fill" id="ring-fill"
           stroke-dasharray="${CIRCUMFERENCE}" transform="rotate(-90 110 110)"/>
+        <circle cx="110" cy="110" r="${RADIUS}" class="ring-notches"
+          stroke-dasharray="3 ${CIRCUMFERENCE / 30 - 3}" transform="rotate(-90 110 110)"/>
       </svg>
       <div class="ring-center" id="ring-label">
-        <small>Today</small>
+        <div class="ring-buddy">${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}</div>
+        <small class="eyebrow">Today</small>
         <b id="today-steps"></b>
         <span id="goal-text"></span>
       </div>
     </section>
 
     <div class="stat-row">
-      <div class="stat"><small>This walk</small><b id="session-steps">0</b></div>
-      <div class="stat"><small>Points this walk</small><b id="session-points">0</b></div>
+      <div class="stat"><small>${icons.boot}This walk</small><b id="session-steps">0</b></div>
+      <div class="stat"><small>${pointIcon}Points this walk</small><b id="session-points">0</b></div>
     </div>
 
     <p class="status" id="walk-status" aria-live="polite"></p>
@@ -48,18 +53,20 @@ export function mount(el) {
     const today = app.todaySteps;
     const pct = Math.min(1, today / user.dailyGoal);
     $('walk-points').textContent = fmt(user.points);
+    $('walk-balance').setAttribute('aria-label', `${user.points} Stride Points`);
     $('today-steps').textContent = fmt(today);
     $('goal-text').textContent = today >= user.dailyGoal
       ? 'Goal reached!'
-      : `of ${fmt(user.dailyGoal)} steps`;
+      : `${Math.floor(pct * 100)}% of ${fmt(user.dailyGoal)}`;
     $('ring-fill').style.strokeDashoffset = CIRCUMFERENCE * (1 - pct);
     $('ring-fill').classList.toggle('is-done', pct >= 1);
     $('session-steps').textContent = fmt(walk.sessionSteps);
     $('session-points').textContent = fmt(Math.floor(walk.sessionSteps / 100));
 
     const toggle = $('walk-toggle');
-    toggle.textContent = walk.walking ? 'End Walk' : 'Start Walking';
-    toggle.className = `btn btn-block btn-xl ${walk.walking ? 'btn-pink' : 'btn-primary'}`;
+    toggle.innerHTML = walk.walking ? 'End Walk' : `${icons.play}Start Walking`;
+    toggle.className = `btn btn-block btn-xl ${walk.walking ? 'btn-pink is-walking' : 'btn-primary'}`;
+    el.querySelector('.ring-buddy .buddy').classList.toggle('is-walking', walk.walking);
     if (walk.walking) {
       if (walk.sensorSeen) setStatus('Counting your steps…');
       else if (!$('walk-status').dataset.sticky) setStatus('Waiting for the motion sensor…');

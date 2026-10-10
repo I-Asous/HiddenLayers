@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, before, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { GpsFilter, distanceM, bearingDeg, pathLengthM, pointAlong, stepsFromMeters } from '../public/js/geo.js';
 import { StepDetector } from '../public/js/steps.js';
+import {
+  BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, cleanLine, stripTags,
+} from '../server/ai.js';
 import { createApp } from '../server/app.js';
-import { pointsEarned, resolveBattle, stageForLevel, upgradeCosts } from '../server/game.js';
+import {
+  MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
+} from '../server/game.js';
 
 test('evolution stages follow level bands', () => {
   assert.deepEqual([1, 4, 5, 9, 10, 19, 20, 50].map(stageForLevel),
@@ -21,6 +28,29 @@ test('leftover steps carry over between syncs', () => {
   assert.equal(pointsEarned(0, 99), 0);
   assert.equal(pointsEarned(99, 100), 1);
   assert.equal(pointsEarned(150, 420), 3);
+});
+
+test('the walking streak only counts today once the goal is hit', () => {
+  const byDay = new Map([[7, 6000], [8, 7000], [9, 6500], [10, 100]]);
+  assert.equal(streakFor(byDay, 10, 6000), 3);
+  assert.equal(streakFor(new Map([...byDay, [10, 6000]]), 10, 6000), 4);
+  assert.equal(streakFor(byDay, 12, 6000), 0);
+});
+
+test('mood follows walking and battles, first matching rule wins', () => {
+  const mood = (week, { streak = 0, lastBattles = [], msSinceLastBattle = Infinity } = {}) =>
+    moodFor({ week, goal: 1000, streak, lastBattles, msSinceLastBattle });
+  const walked = [500, 500, 500, 500, 500, 500];
+  const twoLosses = { lastBattles: ['loss', 'loss'], streak: 5 };
+  assert.equal(mood([...walked, 1200], { ...twoLosses, msSinceLastBattle: 60_000 }), 'upset');
+  // Being upset wears off a couple of minutes after the last battle.
+  assert.equal(mood([...walked, 1200], { ...twoLosses, msSinceLastBattle: UPSET_MS }), 'proud');
+  assert.equal(mood([...walked, 1200], { lastBattles: ['win', 'loss'], streak: 5, msSinceLastBattle: 0 }), 'proud');
+  assert.equal(mood([...walked, 1200], { lastBattles: ['loss'], msSinceLastBattle: 0 }), 'happy');
+  assert.equal(mood([500, 500, 500, 500, 0, 0, 0]), 'lonely');
+  assert.equal(mood([...walked, 0]), 'sleepy');
+  assert.equal(mood([...walked, 300]), 'eager');
+  assert.deepEqual(Object.keys(MOOD_STYLES).sort(), [...MOODS].sort());
 });
 
 test('battle: 5 rounds, one attack each, damage = attack + 0..3, dodges do nothing', () => {
@@ -131,6 +161,7 @@ test('walking a path point by point covers its whole length', () => {
 let server;
 let base;
 let token;
+let dbFile;
 
 async function call(method, route, body, auth = token) {
   const res = await fetch(base + route, {
@@ -143,7 +174,8 @@ async function call(method, route, body, auth = token) {
 
 before(async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'stepbuddy-'));
-  server = createApp({ dbFile: path.join(dir, 'test.db'), dataDir: dir });
+  dbFile = path.join(dir, 'test.db');
+  server = await createApp({ dbFile, dataDir: dir });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}/api`;
   const login = await call('POST', '/login', { username: 'walker', buddyName: 'Nib', species: 'kraken' }, null);
@@ -270,6 +302,157 @@ test('talking works without API keys', async () => {
   const { data } = await call('POST', '/talk', { event: 'chat' });
   assert.ok(data.text.length > 0);
   assert.equal(data.audioUrl, null);
+  assert.ok(MOODS.includes((await call('GET', '/me')).data.buddy.mood));
+});
+
+test('a buddy gets one personality and keeps it', async () => {
+  await call('POST', '/talk', { event: 'chat' });
+  const first = (await call('GET', '/me')).data.buddy.personality;
+  assert.equal(first.traits.length, 3);
+  assert.ok(PERSONALITY_PRESETS.some((p) => p.quirk === first.quirk));
+  await call('POST', '/talk', { event: 'chat' });
+  assert.deepEqual((await call('GET', '/me')).data.buddy.personality, first);
+});
+
+test('buddy lines lose emojis and action text but keep audio tags for speech', () => {
+  const speech = cleanLine('*giggles* Hi there! 😄 [laughs] Let\'s go 🚶‍♀️ [whisp');
+  assert.equal(speech, 'Hi there! [laughs] Let\'s go');
+  assert.equal(stripTags(speech), 'Hi there! Let\'s go');
+});
+
+test('every preset voice exists and every voice has a preset', () => {
+  for (const preset of PERSONALITY_PRESETS) assert.ok(preset.voice in VOICES, preset.voice);
+  for (const key of Object.keys(VOICES)) assert.ok(PERSONALITY_PRESETS.some((p) => p.voice === key), key);
+});
+
+test('a personality with a removed voice is cleared on startup', async () => {
+  await call('POST', '/talk', { event: 'chat' });
+  const db = new DatabaseSync(dbFile);
+  const userId = (await call('GET', '/me')).data.user.id;
+  db.prepare('UPDATE buddies SET personality = ? WHERE user_id = ?')
+    .run(JSON.stringify({ ...PERSONALITY_PRESETS[0], voice: 'removed' }), userId);
+  await createApp({ dbFile, dataDir: path.dirname(dbFile) });
+  assert.equal(db.prepare('SELECT personality FROM buddies WHERE user_id = ?').get(userId).personality, null);
+  db.close();
+});
+
+test('event lines work without API keys', async () => {
+  const { data } = await call('POST', '/talk', { event: 'levelup' });
+  assert.equal(data.source, 'builtin');
+  assert.ok(data.text.length > 0);
+});
+
+test('with keys, text returns before the voice and event lines are prepared ahead', async () => {
+  const realFetch = globalThis.fetch;
+  const savedEnv = { ...process.env };
+  let geminiCalls = 0;
+  let ttsActive = 0;
+  let ttsMaxActive = 0;
+  const situations = [];
+  const stabilities = [];
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith(base)) return realFetch(url, opts);
+    if (String(url).includes('generativelanguage')) {
+      geminiCalls++;
+      const wantsJson = JSON.parse(opts.body).generationConfig.responseMimeType;
+      if (!wantsJson) situations.push(JSON.parse(opts.body).contents.at(-1).parts[0].text);
+      const text = wantsJson ? JSON.stringify(PERSONALITY_PRESETS[0]) : `[giggles] Line ${geminiCalls}!`;
+      return Response.json({ candidates: [{ content: { parts: [{ text }] } }] });
+    }
+    stabilities.push(JSON.parse(opts.body).voice_settings.stability);
+    ttsMaxActive = Math.max(ttsMaxActive, ++ttsActive); // ElevenLabs
+    await sleep(200);
+    ttsActive--;
+    return new Response(new Uint8Array([1, 2, 3]));
+  };
+  Object.assign(process.env, { GEMINI_API_KEY: 'test', ELEVENLABS_API_KEY: 'test' });
+  const db = new DatabaseSync(dbFile);
+  const until = async (check) => {
+    for (let i = 0; i < 200 && !check(); i++) await sleep(10);
+    assert.ok(check(), 'timed out');
+  };
+  try {
+    const userId = (await call('GET', '/me')).data.user.id;
+    const ready = (event) => db.prepare('SELECT text FROM ready_lines WHERE user_id = ? AND event = ?').get(userId, event);
+
+    // The line comes back while its mp3 is still being made; the audio URL waits for it.
+    const { data } = await call('POST', '/talk', { event: 'levelup' });
+    assert.match(data.text, /^Line \d+!$/);
+    assert.equal(existsSync(path.join(path.dirname(dbFile), 'tts', data.audioUrl.slice(9))), false);
+    const audio = await realFetch(base.slice(0, -4) + data.audioUrl);
+    assert.equal(audio.status, 200);
+    assert.equal(audio.headers.get('content-type'), 'audio/mpeg');
+
+    // Every event gets a line ready; using one serves it as is and makes the next.
+    await until(() => BUDDY_EVENTS.every(ready));
+    const prepared = ready('win').text;
+    const win = await call('POST', '/talk', { event: 'win' });
+    assert.equal(win.data.text, prepared);
+    await until(() => ready('win') && ready('win').text !== prepared);
+
+    // Lines are written and voiced in the buddy's current mood.
+    const { mood } = (await call('GET', '/me')).data.buddy;
+    assert.ok(situations.every((text) => text.startsWith(`Right now you feel ${MOOD_STYLES[mood].feeling}`)));
+    assert.ok(stabilities.every((value) => value === MOOD_STYLES[mood].stability));
+
+    // A line prepared in another mood is stale and isn't used.
+    db.prepare('UPDATE ready_lines SET mood = ? WHERE user_id = ? AND event = ?').run('other', userId, 'loss');
+    const stale = ready('loss').text;
+    assert.notEqual((await call('POST', '/talk', { event: 'loss' })).data.text, stale);
+
+    // Never more ElevenLabs requests at once than the plan allows (5), with room to spare.
+    assert.ok(ttsMaxActive > 1 && ttsMaxActive <= 3, `max concurrent TTS: ${ttsMaxActive}`);
+  } finally {
+    await allSpeechDone(); // queued voice jobs must not reach the real ElevenLabs
+    globalThis.fetch = realFetch;
+    process.env = savedEnv;
+    db.close();
+  }
+});
+
+test('the buddy remembers its last 8 exchanges and sends them as the conversation', async () => {
+  const realFetch = globalThis.fetch;
+  const savedEnv = { ...process.env };
+  let replies = 0;
+  let lastChat;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith(base)) return realFetch(url, opts);
+    const { contents } = JSON.parse(opts.body);
+    if (contents.at(-1).parts[0].text.includes('React to the user')) lastChat = contents;
+    return Response.json({ candidates: [{ content: { parts: [{ text: `Reply ${++replies}` }] } }] });
+  };
+  Object.assign(process.env, { GEMINI_API_KEY: 'test' });
+  try {
+    const said = [];
+    for (let i = 0; i < 10; i++) said.push((await call('POST', '/talk', { event: 'chat' })).data.text);
+    // The 10th chat saw the 8 exchanges before it: user/model turns, then the new situation.
+    assert.equal(lastChat.length, 17);
+    assert.deepEqual(lastChat.filter((turn) => turn.role === 'model').map((turn) => turn.parts[0].text), said.slice(1, 9));
+    assert.ok(lastChat.slice(0, -1).every((turn, i) => turn.role === (i % 2 ? 'model' : 'user')));
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env = savedEnv;
+  }
+});
+
+test('a Gemini reply that is only an action or tag falls back to a built-in line', async () => {
+  const realFetch = globalThis.fetch;
+  const savedEnv = { ...process.env };
+  globalThis.fetch = async (url, opts) => (String(url).startsWith(base)
+    ? realFetch(url, opts)
+    : Response.json({ candidates: [{ content: { parts: [{ text: '*giggles* [laughs]' }] } }] }));
+  Object.assign(process.env, { GEMINI_API_KEY: 'test' });
+  const logged = console.error;
+  console.error = () => {}; // the fallback logs why; expected here
+  try {
+    const { data } = await call('POST', '/talk', { event: 'chat' });
+    assert.equal(data.source, 'builtin');
+    assert.ok(data.text.length > 0);
+  } finally {
+    console.error = logged;
+    globalThis.fetch = realFetch;
+    process.env = savedEnv;
+  }
 });
 
 test('friends: add by username, mutual, no duplicates, removable', async () => {

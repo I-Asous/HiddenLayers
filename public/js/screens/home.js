@@ -1,35 +1,21 @@
 import { api } from '../api.js';
 import { SPECIES, buddySvg, stageName } from '../buddy.js';
-import { buddySay, confetti, escapeHtml, fmt, toast } from '../fx.js';
+import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
+import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { openProfile } from './profile.js';
 
 const NEXT_STAGE = { egg: ['baby', 1, 5], baby: ['teen', 5, 10], teen: ['adult', 10, 20] };
 
-function buddyLine() {
-  const { user, buddy } = app.state;
-  if (app.spoken && app.spoken.until > Date.now()) return app.spoken.text;
-  const today = app.todaySteps;
-  if (walk.walking) return 'Left, right, left, right! I can feel us moving!';
-  if (today >= user.dailyGoal) return 'We hit our goal today! You\'re amazing!';
-  if (today === 0) {
-    return new Date().getHours() < 11
-      ? 'Good morning! Shall we go for a walk?'
-      : 'Zzz… I haven\'t stretched my legs all day.';
-  }
-  if (user.points >= buddy.costs.level) return 'I feel ready to grow… tap Level Up!';
-  if (today >= user.dailyGoal / 2) return 'More than halfway to our goal! Keep going!';
-  return 'Every step makes me stronger!';
-}
-
-function upgradeButton(type, label, detail, cost, points) {
+function upgradeButton(type, icon, label, detail, cost, points) {
   const short = points < cost;
   return `
     <button class="upgrade ${short ? 'is-short' : ''}" data-upgrade="${type}" aria-disabled="${short}">
+      ${icon}
       <span class="upgrade-label">${label}</span>
       <span class="upgrade-detail">${detail}</span>
-      <span class="cost">${pointIcon}${fmt(cost)}</span>
+      <span class="cost">${short ? `Need ${fmt(cost - points)}` : `${pointIcon}${fmt(cost)}`}</span>
     </button>`;
 }
 
@@ -46,16 +32,15 @@ export function mount(el) {
   function render() {
     const { user, buddy, record } = app.state;
     const today = app.todaySteps;
-    const goalPct = Math.min(100, (today / user.dailyGoal) * 100);
+    const speaking = app.spoken && app.spoken.until > Date.now();
     const next = NEXT_STAGE[buddy.stage];
     const nextTitle = next && (SPECIES[buddy.species] ?? SPECIES.dragon).titles[next[0]];
     const evolveHtml = next
       ? `<div class="evolve">
-          <div class="evolve-text"><span>Evolves into ${nextTitle} at Lv ${next[2]}</span>
-            <span>Lv ${buddy.level}</span></div>
+          <div class="evolve-text"><span>Lv ${buddy.level}</span><span>${nextTitle} at Lv ${next[2]}</span></div>
           <div class="bar"><i style="width:${((buddy.level - next[1]) / (next[2] - next[1])) * 100}%"></i></div>
         </div>`
-      : '<div class="evolve"><div class="evolve-text"><span>Fully grown!</span><span>Lv ' + buddy.level + '</span></div></div>';
+      : '<div class="evolve"><div class="evolve-text"><span>Fully grown!</span></div></div>';
 
     el.innerHTML = `
       <header class="topbar">
@@ -67,33 +52,35 @@ export function mount(el) {
         <div class="balance" aria-label="${user.points} Stride Points">${pointIcon}<b>${fmt(user.points)}</b></div>
       </header>
 
-      <div class="bubble" aria-live="polite">${escapeHtml(buddyLine())}</div>
       <section class="stage-card">
+        <div class="scene-hud">
+          <span class="hud-badge hud-level">Lv ${buddy.level}</span>
+          <span class="hud-badge" aria-label="${today} steps today">${icons.boot}${fmt(today)}</span>
+        </div>
+        <div class="bubble home-bubble" aria-live="polite" ${speaking ? '' : 'hidden'}>${speaking ? escapeHtml(app.spoken.text) : ''}</div>
         ${buddySvg(buddy, { className: `is-idle ${today === 0 && !walk.walking ? 'is-sleepy' : ''}` })}
         <div class="nameplate">
-          <b>${escapeHtml(buddy.name)}</b>
-          <span>Lv ${buddy.level} ${stageName(buddy)} · ${fmt(buddy.xp)} XP</span>
+          <div>
+            <b>${escapeHtml(buddy.name)}</b>
+            <span>${stageName(buddy)} · ${fmt(buddy.xp)} XP</span>
+          </div>
+          <div class="nameplate-stats">
+            <span class="stat-badge is-attack" aria-label="Attack ${buddy.attack}">${icons.sword}${buddy.attack}</span>
+            <span class="stat-badge is-evasion" aria-label="Evasion ${buddy.evasion}">${icons.dash}${buddy.evasion}</span>
+          </div>
+          <button class="btn btn-pink icon-talk" id="talk-btn" aria-label="Talk to ${escapeHtml(buddy.name)}">
+            <svg viewBox="0 0 8 8" width="20" height="20" shape-rendering="crispEdges" aria-hidden="true"><path
+              fill="currentColor" d="M1 1h6v4h-3v1h-1v1h-1v-2h-1z"/></svg>
+          </button>
         </div>
+        ${evolveHtml}
       </section>
 
-      ${evolveHtml}
-
       <div class="upgrades">
-        ${upgradeButton('level', 'Level Up', `Lv ${buddy.level} → ${buddy.level + 1}`, buddy.costs.level, user.points)}
-        ${upgradeButton('attack', '+1 Attack', `${buddy.attack} → ${buddy.attack + 1}`, buddy.costs.attack, user.points)}
-        ${upgradeButton('evasion', '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
-      </div>
-
-      <button class="btn btn-pink btn-block" id="talk-btn">
-        <svg viewBox="0 0 8 8" width="16" height="16" shape-rendering="crispEdges" aria-hidden="true"><path
-          fill="currentColor" d="M1 1h6v4h-3v1h-1v1h-1v-2h-1z"/></svg>
-        Talk to ${escapeHtml(buddy.name)}
-      </button>
-
-      <a class="today-card" href="#walk">
-        <div><small>Today</small><b>${fmt(today)}</b> <span>/ ${fmt(user.dailyGoal)} steps</span></div>
-        <div class="bar"><i style="width:${goalPct}%"></i></div>
-      </a>`;
+        ${upgradeButton('level', icons.arrowUp, 'Level Up', `Lv ${buddy.level} → ${buddy.level + 1}`, buddy.costs.level, user.points)}
+        ${upgradeButton('attack', icons.sword, '+1 Attack', `${buddy.attack} → ${buddy.attack + 1}`, buddy.costs.attack, user.points)}
+        ${upgradeButton('evasion', icons.dash, '+1 Evasion', `${buddy.evasion} → ${buddy.evasion + 1}`, buddy.costs.evasion, user.points)}
+      </div>`;
   }
 
   async function upgrade(type) {
@@ -129,8 +116,13 @@ export function mount(el) {
     button.disabled = true;
     button.classList.add('is-loading');
     const text = await buddySay('chat');
-    if (text) app.say(text);
-    else toast('Your buddy is feeling shy. Try again in a moment.', 'warn');
+    if (text) {
+      app.say(text);
+      // The first talk gives the buddy its personality; fetch it so the traits show.
+      if (!app.state.buddy.personality) app.refresh().catch(() => {});
+    } else {
+      toast('Your buddy is feeling shy. Try again in a moment.', 'warn');
+    }
     // The screen may have re-rendered while waiting; the old button is gone then.
     button.disabled = false;
     button.classList.remove('is-loading');
@@ -144,26 +136,40 @@ export function mount(el) {
     if (event.target.closest('#profile-btn')) return openProfile();
   };
   el.addEventListener('click', onClick);
-  // Re-render when a spoken line expires so the bubble returns to normal.
+  // The bubble goes away shortly after the buddy finishes talking.
+  let quietTimer;
+  const onVoiceEnd = () => {
+    clearTimeout(quietTimer);
+    const line = app.spoken;
+    quietTimer = setTimeout(() => {
+      if (app.spoken !== line) return; // a newer line started meanwhile
+      app.spoken = null;
+      render();
+    }, 1200);
+  };
+  voice.addEventListener('end', onVoiceEnd);
+  // Re-render when a spoken line expires so the bubble goes away, and
+  // fetch the new mood once a short-lived one (upset) wears off.
+  let refreshedFor = null;
   const tick = setInterval(() => {
     if (app.spoken && app.spoken.until <= Date.now()) {
       app.spoken = null;
       render();
     }
+    const until = app.state?.buddy.moodUntil;
+    if (until && until <= Date.now() && refreshedFor !== until) {
+      refreshedFor = until;
+      app.refresh().catch(() => {});
+    }
   }, 1000);
-  // Steps arrive a couple of times a second during a walk. Only the step card
-  // is touched for those, so the buddy's animation isn't restarted each time.
+  // Steps arrive a couple of times a second during a walk. Only re-render when
+  // walking starts or stops, so the buddy's animation isn't restarted each time.
   let wasWalking = walk.walking;
   const onWalk = () => {
     if (walk.walking !== wasWalking) {
       wasWalking = walk.walking;
-      return render();
+      render();
     }
-    const card = el.querySelector('.today-card');
-    if (!card) return;
-    const today = app.todaySteps;
-    card.querySelector('b').textContent = fmt(today);
-    card.querySelector('.bar i').style.width = `${Math.min(100, (today / app.state.user.dailyGoal) * 100)}%`;
   };
   walk.addEventListener('change', onWalk);
   render();
@@ -173,7 +179,9 @@ export function mount(el) {
     destroy() {
       el.removeEventListener('click', onClick);
       walk.removeEventListener('change', onWalk);
+      voice.removeEventListener('end', onVoiceEnd);
       clearInterval(tick);
+      clearTimeout(quietTimer);
     },
   };
 }

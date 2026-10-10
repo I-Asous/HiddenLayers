@@ -3,10 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buddyLine, isBuddyEvent, speak } from './ai.js';
+import {
+  BUDDY_EVENTS, MOOD_STYLES, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
+  waitForSpeech,
+} from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, pointsEarned, resolveBattle, stageForLevel, upgradeCosts,
+  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor,
+  upgradeCosts,
 } from './game.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -31,54 +35,147 @@ class HttpError extends Error {
   }
 }
 
-export function createApp({ dbFile, dataDir }) {
-  const db = openDb(dbFile);
+export async function createApp({ dbFile, dataDir }) {
+  const db = await openDb(dbFile);
   const ttsDir = path.join(dataDir, 'tts');
 
-  const getBuddy = (userId) => db.prepare('SELECT * FROM buddies WHERE user_id = ?').get(userId);
-  const getUser = (userId) => db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  // A personality whose voice was removed from VOICES gets regenerated on next talk.
+  for (const { user_id, personality } of await db.all('SELECT user_id, personality FROM buddies WHERE personality IS NOT NULL')) {
+    if (!(JSON.parse(personality).voice in VOICES)) {
+      await db.run('UPDATE buddies SET personality = NULL WHERE user_id = ?', [user_id]);
+      await db.run('DELETE FROM ready_lines WHERE user_id = ?', [user_id]);
+      await db.run('DELETE FROM buddy_memory WHERE user_id = ?', [user_id]);
+    }
+  }
 
-  function record(userId) {
-    const row = db.prepare(`
+  // Pass tx as q inside a transaction.
+  const getBuddy = (userId, q = db) => q.get('SELECT * FROM buddies WHERE user_id = ?', [userId]);
+  const getUser = (userId, q = db) => q.get('SELECT * FROM users WHERE id = ?', [userId]);
+
+  // Each buddy's personality is generated once and kept. One generation per
+  // user at a time, so a login and a quick tap on Talk share a Gemini call.
+  const personalityInFlight = new Map();
+  async function ensurePersonality(userId) {
+    const buddy = await getBuddy(userId);
+    if (buddy.personality) return;
+    if (!personalityInFlight.has(userId)) {
+      personalityInFlight.set(userId, generatePersonality(buddy).then(async (personality) => {
+        await db.run('UPDATE buddies SET personality = ? WHERE user_id = ? AND personality IS NULL',
+          [JSON.stringify(personality), userId]);
+      }).finally(() => personalityInFlight.delete(userId)));
+    }
+    return personalityInFlight.get(userId);
+  }
+
+  // The last 7 days of steps (oldest first), the goal, and the buddy's mood.
+  async function moodContext(userId, tz) {
+    const user = await getUser(userId);
+    const byDay = await stepsByDay(db, userId, tz);
+    const today = localDay(Date.now(), tz);
+    const week = [];
+    for (let day = today - 6; day <= today; day++) {
+      week.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
+    }
+    const battles = await db.all(`
+      SELECT winner_id, created_at FROM battles
+      WHERE challenger_id = :id OR opponent_id = :id
+      ORDER BY created_at DESC LIMIT 2
+    `, { id: userId });
+    const mood = moodFor({
+      week: week.map((d) => d.steps), goal: user.daily_goal,
+      streak: streakFor(byDay, today, user.daily_goal),
+      lastBattles: battles.map(({ winner_id }) => (winner_id === null ? 'draw' : winner_id === userId ? 'win' : 'loss')),
+      msSinceLastBattle: battles.length ? Date.now() - battles[0].created_at : Infinity,
+    });
+    // When the mood wears off by itself, so the app can refresh right then.
+    const moodUntil = mood === 'upset' ? battles[0].created_at + UPSET_MS : null;
+    return { week, goal: user.daily_goal, mood, moodUntil };
+  }
+
+  // The buddy remembers its last few exchanges, so it can build on them and
+  // doesn't repeat itself.
+  const MEMORY_SIZE = 8;
+  const recall = async (userId) => (await db
+    .all('SELECT situation, reply FROM buddy_memory WHERE user_id = ? ORDER BY id DESC LIMIT ?', [userId, MEMORY_SIZE]))
+    .reverse();
+  async function remember(userId, situation, reply) {
+    await db.run('INSERT INTO buddy_memory (user_id, situation, reply) VALUES (?, ?, ?)', [userId, situation, reply]);
+    await db.run(`
+      DELETE FROM buddy_memory WHERE user_id = ? AND id NOT IN
+        (SELECT id FROM buddy_memory WHERE user_id = ? ORDER BY id DESC LIMIT ?)
+    `, [userId, userId, MEMORY_SIZE]);
+  }
+
+  // Event lines are written and voiced ahead of time so level-ups and battles
+  // answer instantly. They live in the DB so a restart doesn't spend credits again.
+  const preparing = new Set();
+  function prepareLines(userId, tz) {
+    if (!process.env.GEMINI_API_KEY) return; // built-in lines are instant anyway
+    for (const event of BUDDY_EVENTS) {
+      const key = `${userId}:${event}`;
+      if (preparing.has(key)) continue;
+      preparing.add(key);
+      (async () => {
+        if (await db.get('SELECT 1 FROM ready_lines WHERE user_id = ? AND event = ?', [userId, event])) return;
+        const buddy = await getBuddy(userId);
+        buddy.personality = JSON.parse(buddy.personality);
+        const { week, goal, mood } = await moodContext(userId, tz);
+        const line = await buddyLine({ event, buddy, week, goal, mood, memory: await recall(userId) });
+        if (line.source !== 'gemini') return;
+        await db.run(`
+          INSERT INTO ready_lines (user_id, event, text, speech, mood) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (user_id, event) DO UPDATE SET text = excluded.text, speech = excluded.speech, mood = excluded.mood
+        `, [userId, event, line.text, line.speech, mood]);
+        startSpeech(line.speech, ttsDir, buddy.personality.voice, {
+          background: true, stability: MOOD_STYLES[mood].stability,
+        });
+      })().catch((err) => console.error('[ai]', err.message)).finally(() => preparing.delete(key));
+    }
+  }
+
+  async function record(userId) {
+    const row = await db.get(`
       SELECT
-        COALESCE(SUM(winner_id = :id), 0) AS wins,
-        COALESCE(SUM(winner_id IS NOT NULL AND winner_id != :id), 0) AS losses,
-        COALESCE(SUM(winner_id IS NULL), 0) AS draws
+        COALESCE(SUM(CASE WHEN winner_id = :id THEN 1 ELSE 0 END), 0) AS wins,
+        COALESCE(SUM(CASE WHEN winner_id IS NOT NULL AND winner_id != :id THEN 1 ELSE 0 END), 0) AS losses,
+        COALESCE(SUM(CASE WHEN winner_id IS NULL THEN 1 ELSE 0 END), 0) AS draws
       FROM battles WHERE challenger_id = :id OR opponent_id = :id
-    `).get({ id: userId });
+    `, { id: userId });
     return { wins: row.wins, losses: row.losses, draws: row.draws };
   }
 
-  function state(userId, tz) {
-    const user = getUser(userId);
-    const buddy = getBuddy(userId);
+  async function state(userId, tz) {
+    const user = await getUser(userId);
+    const buddy = await getBuddy(userId);
     const today = localDay(Date.now(), tz);
+    const { mood, moodUntil } = await moodContext(userId, tz);
     return {
       user: {
         id: user.id, username: user.username, points: user.points,
         totalSteps: user.total_steps, dailyGoal: user.daily_goal,
       },
-      buddy: { ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy) },
-      todaySteps: stepsByDay(db, userId, tz).get(today) ?? 0,
-      record: record(userId),
+      buddy: {
+        ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
+        personality: traitsOf(buddy), mood, moodUntil,
+      },
+      todaySteps: (await stepsByDay(db, userId, tz)).get(today) ?? 0,
+      record: await record(userId),
     };
   }
 
-  function addPoints(userId, amount) {
-    db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(amount, userId);
+  async function addPoints(tx, userId, amount) {
+    await tx.run('UPDATE users SET points = points + ? WHERE id = ?', [amount, userId]);
   }
 
   // The balance check and the debit are one statement, so a spend can never
   // take the balance below zero or go through twice on a stale read.
-  function spendPoints(userId, cost) {
-    const { changes } = db
-      .prepare('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?')
-      .run(cost, userId, cost);
+  async function spendPoints(tx, userId, cost) {
+    const { changes } = await tx.run('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?', [cost, userId, cost]);
     if (changes !== 1) throw new HttpError(402, 'Not enough Stride Points');
   }
 
   const routes = {
-    'POST /api/login': ({ body, tz }) => {
+    'POST /api/login': async ({ body, tz }) => {
       const username = String(body.username ?? '').trim();
       if (!/^[a-zA-Z0-9_]{2,20}$/.test(username)) {
         throw new HttpError(400, 'Username must be 2–20 letters, numbers or underscores');
@@ -86,25 +183,22 @@ export function createApp({ dbFile, dataDir }) {
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
       const species = SPECIES.includes(body.species) ? body.species : SPECIES[0];
       const token = randomBytes(24).toString('hex');
-      const userId = transaction(db, () => {
-        let user = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+      const userId = await transaction(db, async (tx) => {
+        let user = await tx.get('SELECT id FROM users WHERE username = ?', [username]);
         if (!user) {
-          const { lastInsertRowid } = db
-            .prepare('INSERT INTO users (username, created_at) VALUES (?, ?)')
-            .run(username, Date.now());
-          db.prepare('INSERT INTO buddies (user_id, name, species) VALUES (?, ?, ?)')
-            .run(lastInsertRowid, buddyName, species);
-          user = { id: Number(lastInsertRowid) };
+          const { id } = await tx.run('INSERT INTO users (username, created_at) VALUES (?, ?) RETURNING id', [username, Date.now()]);
+          await tx.run('INSERT INTO buddies (user_id, name, species) VALUES (?, ?, ?)', [id, buddyName, species]);
+          user = { id };
         }
-        db.prepare('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)')
-          .run(token, user.id, Date.now());
+        await tx.run('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)', [token, user.id, Date.now()]);
         return user.id;
       });
-      return { token, ...state(userId, tz) };
+      ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
+      return { token, ...await state(userId, tz) };
     },
 
-    'POST /api/logout': ({ token }) => {
-      db.prepare('DELETE FROM auth_tokens WHERE token = ?').run(token);
+    'POST /api/logout': async ({ token }) => {
+      await db.run('DELETE FROM auth_tokens WHERE token = ?', [token]);
       return { ok: true };
     },
 
@@ -117,25 +211,25 @@ export function createApp({ dbFile, dataDir }) {
       googleMapsMapId: process.env.GOOGLE_MAPS_MAP_ID || null,
     }),
 
-    'PATCH /api/me': ({ userId, body, tz }) => {
+    'PATCH /api/me': async ({ userId, body, tz }) => {
       if (body.dailyGoal !== undefined) {
         const goal = Number(body.dailyGoal);
         if (!Number.isInteger(goal) || goal < 500 || goal > 50_000) {
           throw new HttpError(400, 'Daily goal must be between 500 and 50,000 steps');
         }
-        db.prepare('UPDATE users SET daily_goal = ? WHERE id = ?').run(goal, userId);
+        await db.run('UPDATE users SET daily_goal = ? WHERE id = ?', [goal, userId]);
       }
       if (body.buddyName !== undefined) {
         const name = String(body.buddyName).trim().slice(0, 16);
         if (!name) throw new HttpError(400, 'Your buddy needs a name');
-        db.prepare('UPDATE buddies SET name = ? WHERE user_id = ?').run(name, userId);
+        await db.run('UPDATE buddies SET name = ? WHERE user_id = ?', [name, userId]);
       }
       return state(userId, tz);
     },
 
     // The client reports the running total for its walk session; only the part
     // above last_synced_total is new, so retries and repeats add nothing.
-    'POST /api/steps/sync': ({ userId, body, tz }) => {
+    'POST /api/steps/sync': async ({ userId, body, tz }) => {
       const sessionId = String(body.sessionId ?? '');
       const total = Number(body.total);
       if (!/^[\w-]{8,64}$/.test(sessionId)) throw new HttpError(400, 'Invalid session id');
@@ -143,142 +237,139 @@ export function createApp({ dbFile, dataDir }) {
         throw new HttpError(400, 'Invalid step total');
       }
       const now = Date.now();
-      const result = transaction(db, () => {
-        let session = db.prepare('SELECT * FROM walk_sessions WHERE id = ?').get(sessionId);
+      const result = await transaction(db, async (tx) => {
+        let session = await tx.get('SELECT * FROM walk_sessions WHERE id = ?', [sessionId]);
         if (session && session.user_id !== userId) throw new HttpError(403, 'Not your walk session');
         if (!session) {
-          db.prepare('INSERT INTO walk_sessions (id, user_id, started_at) VALUES (?, ?, ?)')
-            .run(sessionId, userId, now);
+          await tx.run('INSERT INTO walk_sessions (id, user_id, started_at) VALUES (?, ?, ?)', [sessionId, userId, now]);
           session = { last_synced_total: 0 };
         }
         const added = Math.max(0, total - session.last_synced_total);
         let earned = 0;
         if (added > 0) {
-          const before = getUser(userId).total_steps;
+          const before = (await getUser(userId, tx)).total_steps;
           earned = pointsEarned(before, before + added);
-          db.prepare('INSERT INTO step_events (user_id, session_id, timestamp, steps) VALUES (?, ?, ?, ?)')
-            .run(userId, sessionId, now, added);
-          db.prepare('UPDATE walk_sessions SET last_synced_total = ? WHERE id = ?').run(total, sessionId);
-          db.prepare('UPDATE users SET total_steps = total_steps + ?, points = points + ? WHERE id = ?')
-            .run(added, earned, userId);
-          db.prepare('UPDATE buddies SET xp = xp + ? WHERE user_id = ?').run(earned, userId);
+          await tx.run('INSERT INTO step_events (user_id, session_id, timestamp, steps) VALUES (?, ?, ?, ?)',
+            [userId, sessionId, now, added]);
+          await tx.run('UPDATE walk_sessions SET last_synced_total = ? WHERE id = ?', [total, sessionId]);
+          await tx.run('UPDATE users SET total_steps = total_steps + ?, points = points + ? WHERE id = ?',
+            [added, earned, userId]);
+          await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [earned, userId]);
         }
         if (body.ended) {
-          db.prepare('UPDATE walk_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?').run(now, sessionId);
+          await tx.run('UPDATE walk_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?', [now, sessionId]);
         }
         return { added, earned };
       });
-      return { ...result, ...state(userId, tz) };
+      return { ...result, ...await state(userId, tz) };
     },
 
-    'POST /api/buddy/upgrade': ({ userId, body, tz }) => {
+    'POST /api/buddy/upgrade': async ({ userId, body, tz }) => {
       const upgrade = Object.hasOwn(UPGRADES, body.type) ? UPGRADES[body.type] : null;
       if (!upgrade) throw new HttpError(400, 'Unknown upgrade');
-      const result = transaction(db, () => {
-        const buddy = getBuddy(userId);
+      const result = await transaction(db, async (tx) => {
+        const buddy = await getBuddy(userId, tx);
         const cost = upgrade.cost(buddy);
-        spendPoints(userId, cost);
-        db.prepare(`UPDATE buddies SET ${upgrade.column} = ${upgrade.column} + 1 WHERE user_id = ?`).run(userId);
+        await spendPoints(tx, userId, cost);
+        await tx.run(`UPDATE buddies SET ${upgrade.column} = ${upgrade.column} + 1 WHERE user_id = ?`, [userId]);
         let evolvedTo = null;
         if (body.type === 'level') {
           const stage = stageForLevel(buddy.level + 1);
           if (stage !== buddy.stage) {
-            db.prepare('UPDATE buddies SET stage = ? WHERE user_id = ?').run(stage, userId);
+            await tx.run('UPDATE buddies SET stage = ? WHERE user_id = ?', [stage, userId]);
             evolvedTo = stage;
           }
         }
         return { cost, evolvedTo, evolvedFrom: evolvedTo ? buddy.stage : null };
       });
-      return { ...result, ...state(userId, tz) };
+      return { ...result, ...await state(userId, tz) };
     },
 
-    'POST /api/buddy/equip': ({ userId, body, tz }) => {
+    'POST /api/buddy/equip': async ({ userId, body, tz }) => {
       if (!SLOTS.includes(body.slot)) throw new HttpError(400, 'Unknown slot');
       let itemId = null;
       if (body.itemId != null) {
-        const item = db.prepare(`
+        const item = await db.get(`
           SELECT c.id, c.slot FROM cosmetics c
           JOIN owned_cosmetics o ON o.cosmetic_id = c.id AND o.user_id = ?
           WHERE c.id = ?
-        `).get(userId, String(body.itemId));
+        `, [userId, String(body.itemId)]);
         if (!item) throw new HttpError(403, 'You don\'t own that item');
         if (item.slot !== body.slot) throw new HttpError(400, 'That item doesn\'t fit this slot');
         itemId = item.id;
       }
-      db.prepare(`UPDATE buddies SET ${body.slot} = ? WHERE user_id = ?`).run(itemId, userId);
+      await db.run(`UPDATE buddies SET ${body.slot} = ? WHERE user_id = ?`, [itemId, userId]);
       return state(userId, tz);
     },
 
-    'GET /api/store': ({ userId }) => ({ items: storeItems(userId) }),
+    'GET /api/store': async ({ userId }) => ({ items: await storeItems(userId) }),
 
-    'POST /api/store/buy': ({ userId, body, tz }) => {
-      transaction(db, () => {
-        const item = db.prepare('SELECT * FROM cosmetics WHERE id = ?').get(String(body.itemId ?? ''));
+    'POST /api/store/buy': async ({ userId, body, tz }) => {
+      await transaction(db, async (tx) => {
+        const item = await tx.get('SELECT * FROM cosmetics WHERE id = ?', [String(body.itemId ?? '')]);
         if (!item) throw new HttpError(404, 'No such item');
-        const owned = db
-          .prepare('SELECT 1 FROM owned_cosmetics WHERE user_id = ? AND cosmetic_id = ?')
-          .get(userId, item.id);
+        const owned = await tx.get('SELECT 1 FROM owned_cosmetics WHERE user_id = ? AND cosmetic_id = ?', [userId, item.id]);
         if (owned) throw new HttpError(409, 'You already own that');
-        spendPoints(userId, item.price);
-        db.prepare('INSERT INTO owned_cosmetics (user_id, cosmetic_id, bought_at) VALUES (?, ?, ?)')
-          .run(userId, item.id, Date.now());
+        await spendPoints(tx, userId, item.price);
+        await tx.run('INSERT INTO owned_cosmetics (user_id, cosmetic_id, bought_at) VALUES (?, ?, ?)',
+          [userId, item.id, Date.now()]);
       });
-      return { items: storeItems(userId), ...state(userId, tz) };
+      return { items: await storeItems(userId), ...await state(userId, tz) };
     },
 
-    'GET /api/opponents': ({ userId }) => ({
-      opponents: db.prepare(`
+    'GET /api/opponents': async ({ userId }) => ({
+      opponents: (await db.all(`
         SELECT b.*, u.username, f.friend_id IS NOT NULL AS is_friend
         FROM buddies b JOIN users u ON u.id = b.user_id
         LEFT JOIN friendships f ON f.user_id = :id AND f.friend_id = b.user_id
         WHERE b.user_id != :id ORDER BY b.level DESC, u.username LIMIT 100
-      `).all({ id: userId }).map((row) => ({
+      `, { id: userId })).map((row) => ({
         ...publicBuddy(row), userId: row.user_id, username: row.username, isFriend: Boolean(row.is_friend),
       })),
     }),
 
-    'GET /api/friends': ({ userId }) => ({ friends: friendList(userId) }),
+    'GET /api/friends': async ({ userId }) => ({ friends: await friendList(userId) }),
 
     // No requests to approve in this demo: adding someone makes you friends both ways.
-    'POST /api/friends': ({ userId, body }) => {
+    'POST /api/friends': async ({ userId, body }) => {
       const username = String(body.username ?? '').trim().replace(/^@/, '');
-      const friend = username && db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+      const friend = username && await db.get('SELECT id FROM users WHERE username = ?', [username]);
       if (!friend) throw new HttpError(404, `No player called "${username.slice(0, 20)}"`);
       if (friend.id === userId) throw new HttpError(400, 'That\'s you!');
-      const add = db.prepare('INSERT OR IGNORE INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?)');
-      const added = transaction(db, () => {
-        const { changes } = add.run(userId, friend.id, Date.now());
-        add.run(friend.id, userId, Date.now());
+      const add = 'INSERT INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING';
+      const added = await transaction(db, async (tx) => {
+        const { changes } = await tx.run(add, [userId, friend.id, Date.now()]);
+        await tx.run(add, [friend.id, userId, Date.now()]);
         return changes === 1;
       });
       if (!added) throw new HttpError(409, 'You\'re already friends');
-      return { friends: friendList(userId) };
+      return { friends: await friendList(userId) };
     },
 
-    'POST /api/friends/remove': ({ userId, body }) => {
+    'POST /api/friends/remove': async ({ userId, body }) => {
       const friendId = Number(body.userId);
-      db.prepare(`
+      await db.run(`
         DELETE FROM friendships
         WHERE (user_id = :a AND friend_id = :b) OR (user_id = :b AND friend_id = :a)
-      `).run({ a: userId, b: friendId });
-      return { friends: friendList(userId) };
+      `, { a: userId, b: friendId });
+      return { friends: await friendList(userId) };
     },
 
     // ?board=steps|wins|level  ?scope=friends|all
-    'GET /api/leaderboard': ({ userId, tz, query }) => {
+    'GET /api/leaderboard': async ({ userId, tz, query }) => {
       const board = ['steps', 'wins', 'level'].includes(query.get('board')) ? query.get('board') : 'steps';
       const friendsOnly = query.get('scope') !== 'all';
       // "This week" is the last 7 days in the viewer's timezone, today included.
       const weekStart = (localDay(Date.now(), tz) - 6) * DAY_MS + tz * 60_000;
-      const rows = db.prepare(`
+      const rows = await db.all(`
         SELECT b.*, u.username,
           (SELECT COALESCE(SUM(steps), 0) FROM step_events s
             WHERE s.user_id = u.id AND s.timestamp >= :weekStart) AS steps,
           (SELECT COUNT(*) FROM battles bt WHERE bt.winner_id = u.id) AS wins
         FROM users u JOIN buddies b ON b.user_id = u.id
-        WHERE :everyone OR u.id = :id
+        WHERE :everyone = 1 OR u.id = :id
           OR u.id IN (SELECT friend_id FROM friendships WHERE user_id = :id)
-      `).all({ id: userId, weekStart, everyone: friendsOnly ? 0 : 1 });
+      `, { id: userId, weekStart, everyone: friendsOnly ? 0 : 1 });
       const value = (row) => row[board];
       rows.sort((a, b) => value(b) - value(a) || b.xp - a.xp || a.username.localeCompare(b.username));
       const entries = rows.map((row, i) => ({
@@ -296,38 +387,38 @@ export function createApp({ dbFile, dataDir }) {
       return { board, scope: friendsOnly ? 'friends' : 'all', entries: top };
     },
 
-    'POST /api/battles': ({ userId, body, tz }) => {
+    'POST /api/battles': async ({ userId, body, tz }) => {
       const opponentId = Number(body.opponentId);
       if (opponentId === userId) throw new HttpError(400, 'You can\'t battle yourself');
-      const result = transaction(db, () => {
-        const mine = getBuddy(userId);
-        const theirs = getBuddy(opponentId);
+      const result = await transaction(db, async (tx) => {
+        const mine = await getBuddy(userId, tx);
+        const theirs = await getBuddy(opponentId, tx);
         if (!theirs) throw new HttpError(404, 'That buddy has wandered off');
         const battle = resolveBattle(mine, theirs);
         const winnerId = battle.winner === 'a' ? userId : battle.winner === 'b' ? opponentId : null;
-        if (winnerId) addPoints(winnerId, BATTLE_WIN_BONUS);
-        db.prepare('UPDATE buddies SET xp = xp + ? WHERE user_id = ?').run(winnerId === userId ? 10 : 2, userId);
-        const { lastInsertRowid } = db.prepare(`
+        if (winnerId) await addPoints(tx, winnerId, BATTLE_WIN_BONUS);
+        await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [winnerId === userId ? 10 : 2, userId]);
+        const { id } = await tx.run(`
           INSERT INTO battles (challenger_id, opponent_id, winner_id, challenger_damage, opponent_damage, log, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(userId, opponentId, winnerId, battle.totals.a, battle.totals.b, JSON.stringify(battle.log), Date.now());
+          VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
+        `, [userId, opponentId, winnerId, battle.totals.a, battle.totals.b, JSON.stringify(battle.log), Date.now()]);
         return {
-          id: Number(lastInsertRowid),
+          id,
           outcome: battle.winner === 'a' ? 'win' : battle.winner === 'b' ? 'loss' : 'draw',
           bonus: battle.winner === 'a' ? BATTLE_WIN_BONUS : 0,
           log: battle.log,
           totals: battle.totals,
           hpMax: battle.hpMax,
           challenger: publicBuddy(mine),
-          opponent: { ...publicBuddy(theirs), username: getUser(opponentId).username },
+          opponent: { ...publicBuddy(theirs), username: (await getUser(opponentId, tx)).username },
         };
       });
-      return { battle: result, ...state(userId, tz) };
+      return { battle: result, ...await state(userId, tz) };
     },
 
-    'GET /api/battles': ({ userId }) => ({
-      record: record(userId),
-      history: db.prepare(`
+    'GET /api/battles': async ({ userId }) => ({
+      record: await record(userId),
+      history: (await db.all(`
         SELECT bt.id, bt.created_at, bt.challenger_id, bt.winner_id,
                bt.challenger_damage, bt.opponent_damage,
                u.username AS other_username, b.name AS other_buddy
@@ -336,7 +427,7 @@ export function createApp({ dbFile, dataDir }) {
         JOIN buddies b ON b.user_id = u.id
         WHERE bt.challenger_id = :id OR bt.opponent_id = :id
         ORDER BY bt.created_at DESC, bt.id DESC LIMIT 20
-      `).all({ id: userId }).map((row) => {
+      `, { id: userId })).map((row) => {
         const challenged = row.challenger_id === userId;
         return {
           id: row.id,
@@ -350,22 +441,15 @@ export function createApp({ dbFile, dataDir }) {
       }),
     }),
 
-    'GET /api/stats': ({ userId, tz }) => {
-      const user = getUser(userId);
-      const byDay = stepsByDay(db, userId, tz);
+    'GET /api/stats': async ({ userId, tz }) => {
+      const user = await getUser(userId);
+      const byDay = await stepsByDay(db, userId, tz);
       const today = localDay(Date.now(), tz);
       const days = [];
       for (let day = today - 29; day <= today; day++) {
         days.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
       }
-      // Today only counts toward the streak once the goal is hit; until then
-      // yesterday's streak is still alive.
-      let streak = 0;
-      let day = (byDay.get(today) ?? 0) >= user.daily_goal ? today : today - 1;
-      while ((byDay.get(day) ?? 0) >= user.daily_goal) {
-        streak++;
-        day--;
-      }
+      const streak = streakFor(byDay, today, user.daily_goal);
       let best = null;
       for (const [d, steps] of byDay) {
         if (!best || steps > best.steps) best = { date: dayLabel(d), steps };
@@ -386,23 +470,27 @@ export function createApp({ dbFile, dataDir }) {
     'POST /api/talk': async ({ userId, body, tz }) => {
       const event = body.event ?? 'chat';
       if (!isBuddyEvent(event)) throw new HttpError(400, 'Unknown event');
-      const user = getUser(userId);
-      const byDay = stepsByDay(db, userId, tz);
-      const today = localDay(Date.now(), tz);
-      const week = [];
-      for (let day = today - 6; day <= today; day++) {
-        week.push({ date: dayLabel(day), steps: byDay.get(day) ?? 0 });
-      }
-      const { text, source } = await buddyLine({
-        event, buddy: getBuddy(userId), week, goal: user.daily_goal,
-      });
-      const audio = await speak(text, ttsDir);
+      const { week, goal, mood } = await moodContext(userId, tz);
+      await ensurePersonality(userId);
+      const buddy = await getBuddy(userId);
+      buddy.personality = JSON.parse(buddy.personality);
+      // A line written in another mood is stale: drop it and write a fresh one.
+      const taken = event !== 'chat' && await db
+        .get('DELETE FROM ready_lines WHERE user_id = ? AND event = ? RETURNING text, speech, mood', [userId, event]);
+      const ready = taken?.mood === mood && taken;
+      const { text, speech, source } = ready
+        ? { ...ready, source: 'gemini' }
+        : await buddyLine({ event, buddy, week, goal, mood, memory: await recall(userId) });
+      if (source === 'gemini') await remember(userId, situationFor(event, week, goal, mood), speech);
+      prepareLines(userId, tz);
+      // Don't wait for the voice: the text shows now, the audio URL waits for the mp3.
+      const audio = startSpeech(speech, ttsDir, buddy.personality.voice, { stability: MOOD_STYLES[mood].stability });
       return { text, source, audioUrl: audio ? `/api/tts/${audio}` : null };
     },
   };
 
-  function friendList(userId) {
-    return db.prepare(`
+  async function friendList(userId) {
+    return (await db.all(`
       SELECT b.*, u.username,
         (SELECT COUNT(*) FROM battles bt WHERE bt.winner_id = :id
           AND ((bt.challenger_id = :id AND bt.opponent_id = u.id) OR (bt.challenger_id = u.id AND bt.opponent_id = :id))) AS won,
@@ -412,19 +500,19 @@ export function createApp({ dbFile, dataDir }) {
       JOIN users u ON u.id = f.friend_id
       JOIN buddies b ON b.user_id = u.id
       WHERE f.user_id = :id ORDER BY u.username
-    `).all({ id: userId }).map((row) => ({
+    `, { id: userId })).map((row) => ({
       ...publicBuddy(row), userId: row.user_id, username: row.username,
       headToHead: { wins: row.won, losses: row.lost },
     }));
   }
 
-  function storeItems(userId) {
-    return db.prepare(`
+  async function storeItems(userId) {
+    return (await db.all(`
       SELECT c.id, c.slot, c.name, c.price, o.user_id IS NOT NULL AS owned
       FROM cosmetics c
       LEFT JOIN owned_cosmetics o ON o.cosmetic_id = c.id AND o.user_id = ?
       ORDER BY c.sort
-    `).all(userId).map((item) => ({ ...item, owned: Boolean(item.owned) }));
+    `, [userId])).map((item) => ({ ...item, owned: Boolean(item.owned) }));
   }
 
   async function handleApi(req, res, url) {
@@ -433,7 +521,7 @@ export function createApp({ dbFile, dataDir }) {
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
     let userId = null;
     if (url.pathname !== '/api/login') {
-      const auth = token && db.prepare('SELECT user_id FROM auth_tokens WHERE token = ?').get(token);
+      const auth = token && await db.get('SELECT user_id FROM auth_tokens WHERE token = ?', [token]);
       if (!auth) throw new HttpError(401, 'Please sign in');
       userId = auth.user_id;
     }
@@ -443,10 +531,10 @@ export function createApp({ dbFile, dataDir }) {
     sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams }));
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
-      if (url.pathname.startsWith('/api/tts/')) return serveTts(res, ttsDir, url.pathname.slice(9));
+      if (url.pathname.startsWith('/api/tts/')) return await serveTts(res, ttsDir, url.pathname.slice(9));
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       return serveStatic(req, res, url.pathname);
     } catch (err) {
@@ -454,6 +542,8 @@ export function createApp({ dbFile, dataDir }) {
       sendJson(res, err.status ?? 500, { error: err.status ? err.message : 'Something went wrong' });
     }
   });
+  server.dbLabel = db.label;
+  return server;
 }
 
 function publicBuddy(b) {
@@ -461,6 +551,13 @@ function publicBuddy(b) {
     name: b.name, species: b.species, level: b.level, attack: b.attack, evasion: b.evasion, stage: b.stage,
     equipped: { hat: b.hat, eyewear: b.eyewear, accessory: b.accessory, background: b.background },
   };
+}
+
+// What the player sees of the personality; the voice and style stay server-side.
+function traitsOf(b) {
+  if (!b.personality) return null;
+  const { traits, quirk } = JSON.parse(b.personality);
+  return { traits, quirk };
 }
 
 function sendJson(res, status, data) {
@@ -482,8 +579,9 @@ async function readJson(req) {
   throw new HttpError(400, 'Invalid JSON');
 }
 
-function serveTts(res, ttsDir, name) {
+async function serveTts(res, ttsDir, name) {
   if (!/^[a-f0-9]{64}\.mp3$/.test(name)) throw new HttpError(404, 'Not found');
+  await waitForSpeech(name);
   const file = path.join(ttsDir, name);
   if (!existsSync(file)) throw new HttpError(404, 'Not found');
   res.writeHead(200, { 'content-type': MIME['.mp3'], 'cache-control': 'public, max-age=31536000, immutable' });

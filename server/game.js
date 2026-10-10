@@ -34,6 +34,38 @@ export function pointsEarned(totalBefore, totalAfter) {
   return Math.floor(totalAfter / STEPS_PER_POINT) - Math.floor(totalBefore / STEPS_PER_POINT);
 }
 
+// Days in a row the goal was hit. Today only counts once the goal is hit;
+// until then yesterday's streak is still alive. byDay maps day → steps.
+export function streakFor(byDay, today, goal) {
+  let streak = 0;
+  let day = (byDay.get(today) ?? 0) >= goal ? today : today - 1;
+  while ((byDay.get(day) ?? 0) >= goal) {
+    streak++;
+    day--;
+  }
+  return streak;
+}
+
+export const MOODS = ['upset', 'proud', 'happy', 'lonely', 'sleepy', 'eager'];
+
+// Losing two battles in a row upsets the buddy, but only for a couple of minutes.
+export const UPSET_MS = 2 * 60_000;
+
+// The buddy's mood, from how the walking (and battling) is going. week is 7
+// step counts, oldest first, today last; lastBattles is the last two outcomes,
+// newest first. The first matching rule wins.
+export function moodFor({ week, goal, streak, lastBattles, msSinceLastBattle }) {
+  const today = week.at(-1);
+  if (lastBattles.length === 2 && lastBattles.every((r) => r === 'loss') && msSinceLastBattle < UPSET_MS) {
+    return 'upset';
+  }
+  if (streak >= 3) return 'proud';
+  if (today >= goal) return 'happy';
+  if (week.slice(-3).every((steps) => steps === 0)) return 'lonely';
+  if (today === 0) return 'sleepy';
+  return 'eager';
+}
+
 export function dodgeChance(evasion) {
   return evasion / (evasion + 50);
 }

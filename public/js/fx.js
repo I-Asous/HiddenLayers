@@ -72,6 +72,13 @@ const SILENCE = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYA
 const audio = new Audio();
 audio.preload = 'auto';
 
+/** Fires 'end' when the buddy finishes saying a line out loud. */
+export const voice = new EventTarget();
+const finished = () => voice.dispatchEvent(new Event('end'));
+audio.addEventListener('ended', () => {
+  if (audio.src !== SILENCE) finished();
+});
+
 addEventListener('pointerdown', () => {
   audio.src = SILENCE;
   audio.play().catch(() => {});
@@ -83,6 +90,7 @@ function browserSpeak(text) {
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.pitch = 1.6;
   utterance.rate = 1.05;
+  utterance.onend = finished;
   speechSynthesis.speak(utterance);
 }
 

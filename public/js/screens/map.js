@@ -8,7 +8,7 @@
 //   buildings. three.js draws the character into the map's own WebGL scene
 //   through a WebGLOverlayView. Colours then come from the Map ID's cloud style.
 import { api } from '../api.js';
-import { SPECIES } from '../buddy.js';
+import { SPECIES, buddySvg } from '../buddy.js';
 import { escapeHtml, fmt, toast } from '../fx.js';
 import { distanceM, pathLengthM, pointAlong } from '../geo.js';
 import { gps } from '../gps.js';
@@ -117,6 +117,7 @@ export function mount(el) {
   el.innerHTML = `
     <div class="map"><div id="map"></div></div>
     <canvas class="map-buddy" id="map-buddy" width="520" height="520" hidden></canvas>
+    <div class="map-empty" id="map-empty" hidden>${buddySvg(app.state.buddy, { background: false, className: 'is-idle' })}</div>
     <div class="map-card" aria-live="off">
       <div><small>Distance</small><b id="map-distance"></b></div>
       <div><small>Steps</small><b id="map-steps"></b></div>
@@ -160,6 +161,13 @@ export function mount(el) {
   function setStatus(text) {
     $('map-status').textContent = text;
     $('map-status').hidden = !text;
+  }
+
+  // The map can't load: show the buddy on the empty grid and the reason as a dialog.
+  function showProblem(text) {
+    setStatus(text);
+    $('map-status').classList.add('is-alert');
+    $('map-empty').hidden = false;
   }
 
   function updateAvatarPicker() {
@@ -245,11 +253,11 @@ export function mount(el) {
     config ??= await api('/config');
     if (destroyed) return;
     if (!config.googleMapsKey) {
-      setStatus('The map needs a Google Maps key. Add GOOGLE_MAPS_API_KEY to the server\'s .env file and restart it.');
+      showProblem('The map needs a Google Maps key. Add GOOGLE_MAPS_API_KEY to the server\'s .env file and restart it.');
       return;
     }
     // Google calls this when the key is wrong, restricted, or has no billing.
-    window.gm_authFailure = () => setStatus('Google Maps rejected the key. Check GOOGLE_MAPS_API_KEY and that the Maps JavaScript API is enabled for it.');
+    window.gm_authFailure = () => showProblem('Google Maps rejected the key. Check GOOGLE_MAPS_API_KEY and that the Maps JavaScript API is enabled for it.');
     const { maps, THREE, GLTFLoader } = await loadLibraries(config.googleMapsKey);
     if (destroyed) return;
 
@@ -421,7 +429,7 @@ export function mount(el) {
   gps.open();
   init().catch((err) => {
     console.error(err);
-    if (!destroyed) setStatus(`${err.message}. Check your connection and reopen the Map tab.`);
+    if (!destroyed) showProblem(`${err.message}. Check your connection and reopen the Map tab.`);
   });
 
   return {
