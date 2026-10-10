@@ -73,24 +73,65 @@ function fallbackChat(buddy, week, goal) {
   return `We walked on ${active} of the last 7 days! Let's get out there again today!`;
 }
 
+// Fallback models in case the primary one encounters a transient 503 spike
+const FALLBACK_MODELS = ['gemini-2.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+
+export const CREATURE_VISUALS = {
+  dragon: 'a winged reptile with emerald green scales, a lime belly, yellow horn ridges, red-tipped wings, and tiny sharp fangs',
+  phoenix: 'a bird of living flame with blazing orange and crimson feathers, a golden glowing crest, and fiery plumage',
+  kraken: 'a deep-sea cephalopod with a bulbous sky-blue head, curious eyes, and swirling tentacles with cyan suction cups',
+  unicorn: 'an elegant white equine with a radiant golden spiral horn on its forehead, rose-colored mane, and silver hooves',
+  pegasus: 'a winged white celestial horse with broad sky-blue feathered wings and an airy cyan mane',
+  griffin: 'a regal hybrid beast with the sharp beak, talons, and feathered wings of an eagle and the muscular hindquarters of a golden lion',
+  hydra: 'a multi-headed serpent with toxic emerald scales and three slender hissing necks that bite and bicker with each other',
+  cerberus: 'a muscular three-headed hound of the underworld with dark obsidian fur, pointed ears, and three expressive barking snouts',
+  yeti: 'a hulking but fluffy mountain frost ape with thick white snowy fur, pale ice-blue skin, and giant padded paws',
+  kitsune: 'a clever mystical fox with nine bushy flowing tails, fiery amber-orange fur, white tail-tips, and tall pointed ears',
+  minotaur: 'a sturdy bipedal beast with broad muscular shoulders, large curved bull horns, and tough hooves',
+  cyclops: 'a chunky stone-footed brawler with a single huge expressive eye right in the center of its forehead',
+  golem: 'an ancient walking monolith made of carved boulders, mossy granite slabs, and glowing runic eyes',
+  sphinx: 'a regal creature with the golden body of a lion, feathered wings, and an ornate ancient royal headdress',
+  basilisk: 'a slithering serpentine lizard with a spiky frilled neck collar, poisonous green scales, and piercing hypnotic eyes',
+  manticore: 'a fierce chimera with a lion body, leathery bat wings, and a venomous arched scorpion tail with a deadly stinger',
+  thunderbird: 'a storm-bringing raptor with electric navy feathers, crackling lightning plumage, and a zig-zag storm crest',
+  jackalope: 'a speedy, skittish jackrabbit with a fluffy cotton tail and impressive branching deer antlers atop its head',
+  gargoyle: 'a gothic carved stone sentinel with gray granite skin, pointed horns, claws, and leathery bat-like wings',
+  treant: 'a living ancient tree spirit with gnarly bark skin, deep mossy roots for feet, and leafy branches sprouting from its head',
+  djinn: 'a mystical cosmic spirit with swirling smoky vapor instead of legs, glowing eyes, and celestial golden wrist cuffs',
+  kappa: 'a mischievous aquatic river imp with a turtle shell on its back, webbed claws, a beak-like mouth, and a water dish on its head',
+  fenrir: 'a colossal dire wolf with bristling dark slate and frosted silver fur, sharp fangs, and a ferocious predator stance',
+};
+
 // `contents` is a prompt string, or a whole conversation of user/model turns.
 async function gemini(system, contents, generationConfig) {
-  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      system_instruction: { parts: [{ text: system }] },
-      contents: typeof contents === 'string' ? [{ role: 'user', parts: [{ text: contents }] }] : contents,
-      generationConfig: { temperature: 1, maxOutputTokens: 1024, ...generationConfig },
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('').trim();
-  if (!text) throw new Error('Gemini returned no text');
-  return text;
+  const preferred = process.env.GEMINI_MODEL;
+  const models = preferred ? [preferred, ...FALLBACK_MODELS.filter((m) => m !== preferred)] : FALLBACK_MODELS;
+
+  let lastErr;
+  for (const model of models) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: system }] },
+          contents: typeof contents === 'string' ? [{ role: 'user', parts: [{ text: contents }] }] : contents,
+          generationConfig: { temperature: 1, maxOutputTokens: 1024, ...generationConfig },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        lastErr = new Error(`Gemini ${model} ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        continue;
+      }
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('').trim();
+      if (text) return text;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Gemini returned no text');
 }
 
 const AUDIO_TAGS = ['giggles', 'laughs', 'sighs', 'whispers', 'excited', 'sarcastic', 'gasps', 'groans', 'yawns'];
@@ -100,8 +141,9 @@ function systemPrompt(buddy) {
   const p = buddy.personality;
   const never = neverTagsOf(buddy);
   const tags = AUDIO_TAGS.filter((tag) => !never.includes(tag)).map((tag) => `[${tag}]`).join(', ');
+  const visual = CREATURE_VISUALS[buddy.species] ? ` You look like ${CREATURE_VISUALS[buddy.species]}.` : '';
   return `You are ${buddy.name}, a small ${buddy.species} at the "${buddy.stage}" stage of growing up, ` +
-    'the virtual pet of someone who walks to make you grow. ' +
+    'the virtual pet of someone who walks to make you grow.' + visual + ' ' +
     `Your personality: ${p.traits.join(', ')}. Speaking style: ${p.style}. ` +
     `Quirk: ${p.quirk}. The quirk is a background detail: bring it up only rarely, never two lines in a row. ` +
     'Each message is a new moment in one ongoing life together. Never repeat a line, joke or topic you already used; ' +
@@ -184,20 +226,23 @@ export async function buddyLine({ event, buddy, week, goal, mood, memory = [] })
 
 const randomPreset = () => PERSONALITY_PRESETS[Math.floor(Math.random() * PERSONALITY_PRESETS.length)];
 
-async function geminiPersonality(buddy) {
+export async function geminiPersonality(buddy) {
+  const visual = CREATURE_VISUALS[buddy.species] || `a mythical ${buddy.species}`;
   const text = await gemini(
-    'You invent fun, distinct personalities for small virtual pet creatures. Be original and surprising.',
-    `Invent a personality for ${buddy.name}, a ${buddy.species}. Pick the voice that fits it best from: ` +
+    'You invent fun, distinct personalities for small virtual pet creatures based on how they look, their anatomy, and their species nature. Be original, witty, and surprising.',
+    `Invent a personality for ${buddy.name}, a ${buddy.species} (${visual}) at stage "${buddy.stage || 'baby'}".\n` +
+      `Make sure its 3 traits, quirk, and speaking style directly reflect its physical appearance, anatomy, habits, and species traits.\n` +
+      `Pick the voice that fits its appearance and vibe best from: ` +
       Object.entries(VOICES).map(([key, v]) => `${key} (${v.desc})`).join(', ') + '.',
     {
-      temperature: 1.3,
+      temperature: 1.2,
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
         properties: {
           traits: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Exactly 3 one-word traits, capitalized' },
-          quirk: { type: 'STRING', description: 'A short quirk, at most 5 words' },
-          style: { type: 'STRING', description: 'How it talks, e.g. "speaks in dramatic whispers"' },
+          quirk: { type: 'STRING', description: 'A short physical or behavioral quirk based on its look, at most 6 words' },
+          style: { type: 'STRING', description: 'How it talks based on its anatomy (e.g. hisses, barks, speaks in raspy roars), at most 12 words' },
           voice: { type: 'STRING', enum: Object.keys(VOICES) },
         },
         required: ['traits', 'quirk', 'style', 'voice'],
