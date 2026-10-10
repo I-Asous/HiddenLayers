@@ -5,7 +5,13 @@ import { escapeHtml, fmt, toast } from '../fx.js';
 import { app } from '../state.js';
 import { pointIcon } from './home.js';
 
-const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+// Creatures are the eggs: each one hatches into another beast to raise.
+const STORE_CATS = [
+  { id: 'accessories', label: 'Accessories', slots: ['hat', 'eyewear', 'accessory'] },
+  { id: 'background', label: 'Backgrounds', slots: ['background'] },
+  { id: 'creature', label: 'Creatures' },
+];
+export const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
   <!-- outline -->
   <path d="M3 0h2v1h1v1h1v1h1v1h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-1h1v-1h1v-1h1z" fill="#1a1c2c"/>
   <!-- body -->
@@ -29,7 +35,6 @@ const DEFAULT_DIAMOND_PACKAGES = [
 ];
 
 const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds', beasts: 'Beasts' };
-const STORE_CATEGORIES = { all: 'All', eggs: 'Eggs', accessories: 'Accessories' };
 
 export function mount(el) {
   let view = 'store';
@@ -79,33 +84,39 @@ export function mount(el) {
 
   function storeHtml() {
     const { points } = app.state.user;
-    const categories = `
-      <div class="segmented segmented-sub" role="tablist">${Object.entries(STORE_CATEGORIES).map(([id, label]) => `
-        <button role="tab" aria-selected="${id === storeCategory}" data-cat="${id}">${label}</button>`).join('')}
+    const catPills = `
+      <div class="segmented segmented-sub" role="tablist" aria-label="Category">
+        ${STORE_CATS.map((c) =>
+          `<button role="tab" aria-selected="${storeCategory === c.id}" data-cat="${c.id}">${c.label}</button>`
+        ).join('')}
       </div>`;
-    if (storeCategory === 'eggs') return `${categories}${eggsHtml()}`;
-    const heading = (text) => (storeCategory === 'all' ? `<h3>${text}</h3>` : '');
-    const eggSection = storeCategory === 'all' ? `${heading('Eggs')}${eggsHtml()}` : '';
-    return `${categories}${eggSection}${heading('Accessories')}<div class="grid">${items.map((item) => `
-      <article class="item ${item.owned ? 'is-owned' : ''}">
-        <div class="item-art">${cosmeticIcon(item)}${item.owned
-          ? '<span class="stamp">Owned</span>'
-          : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
-        <b>${escapeHtml(item.name)}</b>${item.owned
-          ? '<span class="owned">In your wardrobe</span>'
-          : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
-              data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
-              ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
-      </article>`).join('')}</div>`;
+
+    if (storeCategory === 'creature') return `${catPills}${eggsHtml()}`;
+
+    const activeCat = STORE_CATS.find((c) => c.id === storeCategory);
+    const visible = !activeCat?.slots
+      ? items
+      : items.filter((item) => activeCat.slots.includes(item.slot));
+
+    const grid = visible.length === 0
+      ? '<p class="empty">Nothing here yet.</p>'
+      : `<div class="grid">${visible.map((item) => `
+        <article class="item ${item.owned ? 'is-owned' : ''}">
+          <div class="item-art">${cosmeticIcon(item)}${item.owned
+            ? '<span class="stamp">Owned</span>'
+            : `<span class="price-tag">${pointIcon}${fmt(item.price)}</span>`}</div>
+          <b>${escapeHtml(item.name)}</b>${item.owned
+            ? '<span class="owned">In your wardrobe</span>'
+            : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
+                data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
+                ${points < item.price ? `Need ${fmt(item.price - points)}` : 'Buy'}</button>`}
+        </article>`).join('')}</div>`;
+
+    return `${catPills}${grid}`;
   }
 
   function diamondsHtml() {
-    const currentDiamonds = app.diamonds;
     return `
-      <section class="coin-hero diamond-hero">
-        <div class="coin-balance diamond-balance">${diamondIcon}<span><small>Your diamond balance</small><b>${fmt(currentDiamonds)}</b></span></div>
-        <p>Use diamonds for special offers and future upgrades. This demo purchase adds diamonds instantly.</p>
-      </section>
       <div class="coin-grid diamond-grid">${diamondPackages.map((pack) => {
         const amount = pack.diamonds ?? pack.coins ?? 0;
         return `
@@ -126,7 +137,10 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <h1>${title}</h1>
-        <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+        <div class="topbar-balances">
+          <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+          <div class="balance balance-diamonds" aria-label="${app.diamonds} Diamonds">${diamondIcon}<b>${fmt(app.diamonds)}</b></div>
+        </div>
       </header>
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
@@ -195,7 +209,7 @@ export function mount(el) {
     const tab = event.target.closest('[data-view]');
     if (tab) {
       view = tab.dataset.view;
-      storeCategory = 'all';
+      storeCategory = 'accessories';
       return render();
     }
     const catBtn = event.target.closest('[data-cat]');
