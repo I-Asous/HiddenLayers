@@ -321,7 +321,7 @@ const FALLBACK_LINES = {
  * with what both beasts did. Resolves with the server state once the player
  * closes the result or runs away.
  */
-function playBattle(start) {
+export function playBattle(start) {
   return new Promise((resolve) => {
     let battle = start;
     const overlay = document.createElement('div');

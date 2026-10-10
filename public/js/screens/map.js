@@ -422,9 +422,10 @@ export function mount(el) {
   }
 
   async function fight(id) {
-    const result = await api('/battles', { method: 'POST', body: { opponentId: id } });
-    await playBattle(result.battle);
-    app.setState(result);
+    const { battle } = await api('/battles', { method: 'POST', body: { opponentId: id } });
+    const state = await playBattle(battle);
+    if (state) app.setState(state);
+    else await app.refresh();
     if (focusId === id) await loadProfile(id); // their record changed
   }
 
