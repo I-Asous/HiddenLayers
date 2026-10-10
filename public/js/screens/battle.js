@@ -328,7 +328,7 @@ function playBattle(start) {
     overlay.className = 'overlay arena';
     overlay.innerHTML = `
       <div class="arena-card" role="dialog" aria-modal="true" aria-label="Battle">
-        <p class="eyebrow" id="round">Round 1 of ${battle.rounds}</p>
+        <p class="eyebrow" id="round">Round 1</p>
         <div class="fighters">
           ${fighterHtml('a', battle.challenger, 'You', battle.hpMax)}
           <span class="versus">VS</span>
@@ -427,7 +427,7 @@ function playBattle(start) {
       overlay.querySelector('#result').innerHTML =
         `<p>You: ${describe(data.round.a)}<br>Them: ${describe(data.round.b)}</p>`;
       if (battle.over) return finish(data);
-      overlay.querySelector('#round').textContent = `Round ${battle.round} of ${battle.rounds}`;
+      overlay.querySelector('#round').textContent = `Round ${battle.round}`;
       busy = false;
       sync();
     }
