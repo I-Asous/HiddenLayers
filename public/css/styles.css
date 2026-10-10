@@ -139,20 +139,21 @@ a { color: inherit; text-decoration: none; }
 .balance, .record-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px 8px 8px;
+  gap: 5px;
+  padding: 6px 8px 6px 6px;
   background: var(--panel);
   border: var(--border);
   font-family: var(--pixel);
-  font-size: 13px;
+  font-size: 11px;
   color: var(--yellow);
+  white-space: nowrap;
 }
 
 .record-pill { gap: 0; padding: 0; font-size: 10px; color: var(--dark); }
 .record-pill span { padding: 10px 12px; }
 .record-pill .is-win { background: var(--lime); }
 .record-pill .is-loss { background: var(--orange); border-left: 3px solid var(--ink); }
-.point-icon { width: 24px; height: 24px; flex: none; }
+.point-icon { width: 18px; height: 18px; flex: none; }
 .px-icon { width: 16px; height: 16px; flex: none; }
 .coin-icon {
   display: grid;
@@ -170,8 +171,9 @@ a { color: inherit; text-decoration: none; }
 .topbar-balances {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .balance-diamonds {
@@ -179,7 +181,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 .diamond-icon { width: 28px; height: 28px; flex: none; image-rendering: pixelated; }
-.balance .diamond-icon { width: 24px; height: 24px; }
+.balance .diamond-icon { width: 18px; height: 18px; }
 .coin-balance .diamond-icon { width: 40px; height: 40px; }
 .coin-pack-art .diamond-icon { width: 42px; height: 42px; }
 
