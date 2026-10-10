@@ -13,5 +13,8 @@
     "icons": "node scripts/make-icons.js",
     "model": "node scripts/make-buddy-model.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
   }
 }

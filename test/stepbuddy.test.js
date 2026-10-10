@@ -175,7 +175,7 @@ async function call(method, route, body, auth = token) {
 before(async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'stepbuddy-'));
   dbFile = path.join(dir, 'test.db');
-  server = createApp({ dbFile, dataDir: dir });
+  server = await createApp({ dbFile, dataDir: dir });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}/api`;
   const login = await call('POST', '/login', { username: 'walker', buddyName: 'Nib', species: 'kraken' }, null);
@@ -331,7 +331,7 @@ test('a personality with a removed voice is cleared on startup', async () => {
   const userId = (await call('GET', '/me')).data.user.id;
   db.prepare('UPDATE buddies SET personality = ? WHERE user_id = ?')
     .run(JSON.stringify({ ...PERSONALITY_PRESETS[0], voice: 'removed' }), userId);
-  createApp({ dbFile, dataDir: path.dirname(dbFile) });
+  await createApp({ dbFile, dataDir: path.dirname(dbFile) });
   assert.equal(db.prepare('SELECT personality FROM buddies WHERE user_id = ?').get(userId).personality, null);
   db.close();
 });

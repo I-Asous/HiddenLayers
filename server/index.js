@@ -10,7 +10,8 @@ if (existsSync(envFile)) process.loadEnvFile(envFile);
 const dataDir = process.env.DATA_DIR || path.join(root, 'data');
 const port = Number(process.env.PORT) || 3000;
 
-const server = createApp({ dbFile: path.join(dataDir, 'stepbuddy.db'), dataDir });
+const server = await createApp({ dbFile: path.join(dataDir, 'stepbuddy.db'), dataDir });
+console.log(`db: ${server.dbLabel}`);
 
 server.on('error', (err) => {
   if (err.code !== 'EADDRINUSE') throw err;
