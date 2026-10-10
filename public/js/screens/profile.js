@@ -1,7 +1,7 @@
 import { api, setToken } from '../api.js';
 import { mountStepHistory, parse, shortDate } from '../charts.js';
 import {
-  avatarHtml, distanceUnits, escapeHtml, fmt, fmtDistance, musicSettings, setDistanceUnits, setMusic, toast,
+  distanceUnits, escapeHtml, fmt, fmtDistance, musicSettings, setDistanceUnits, setMusic, toast,
 } from '../fx.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
@@ -56,36 +56,6 @@ function statsHtml(walking) {
     </ul>`;
 }
 
-// The profile picture with its buttons.
-function pictureHtml() {
-  const { user } = app.state;
-  return `
-    ${avatarHtml(user, 'avatar-large')}
-    <div class="picture-actions">
-      <button type="button" class="btn btn-small" data-picture="choose">${user.avatar ? 'Change picture' : 'Add a picture'}</button>
-      ${user.avatar ? '<button type="button" class="btn btn-ghost btn-small" data-picture="remove">Remove</button>' : ''}
-    </div>`;
-}
-
-// Pictures are cropped square and shrunk on the phone until they fit in a
-// request, so a camera photo never has to be uploaded whole.
-const PICTURE_MAX_CHARS = 8000;
-async function shrinkPicture(file) {
-  const image = await createImageBitmap(file);
-  const side = Math.min(image.width, image.height);
-  for (const size of [96, 64, 48]) {
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = size;
-    canvas.getContext('2d')
-      .drawImage(image, (image.width - side) / 2, (image.height - side) / 2, side, side, 0, 0, size, size);
-    for (const quality of [0.8, 0.6, 0.4]) {
-      const url = canvas.toDataURL('image/jpeg', quality);
-      if (url.length <= PICTURE_MAX_CHARS) return url;
-    }
-  }
-  throw new Error('That picture is too detailed. Try another one.');
-}
-
 export async function openProfile() {
   const { user } = app.state;
   let walking = null;
@@ -94,8 +64,6 @@ export async function openProfile() {
         <h2>${escapeHtml(user.username)}</h2>
         <button class="icon-btn" data-close aria-label="Close">X</button>
       </div>
-      <div class="picture" id="picture">${pictureHtml()}</div>
-      <input type="file" id="picture-file" accept="image/*" hidden>
       <div class="sheet-section" id="player-stats">${statsHtml(walking)}</div>
       <h3>Step history</h3>
       <div class="sheet-section" id="charts"><p class="muted">Crunching your steps…</p></div>
@@ -130,37 +98,11 @@ export async function openProfile() {
       <button class="btn btn-ghost btn-block" id="signout">Sign out</button></div>`);
   const { overlay, close } = sheet;
 
-  // A new goal, picture or change of units shows here straight away.
+  // A new goal or a change of units shows here straight away.
   const redraw = () => {
-    if (!app.state) return;
-    overlay.querySelector('#player-stats').innerHTML = statsHtml(walking);
-    overlay.querySelector('#picture').innerHTML = pictureHtml();
+    if (app.state) overlay.querySelector('#player-stats').innerHTML = statsHtml(walking);
   };
 
-  const savePicture = async (avatar) => {
-    try {
-      app.setState(await api('/me', { method: 'PATCH', body: { avatar } }));
-    } catch (err) {
-      toast(err.message, 'warn');
-    }
-  };
-  const fileInput = overlay.querySelector('#picture-file');
-  overlay.querySelector('#picture').addEventListener('click', (event) => {
-    const action = event.target.closest('[data-picture]')?.dataset.picture;
-    if (action === 'choose') fileInput.click();
-    if (action === 'remove') savePicture(null);
-  });
-  fileInput.addEventListener('change', async () => {
-    const [file] = fileInput.files;
-    fileInput.value = ''; // so the same photo can be picked again
-    if (!file) return;
-    try {
-      await savePicture(await shrinkPicture(file));
-    } catch (err) {
-      // createImageBitmap rejects files that aren't pictures it can read.
-      toast(err.message.startsWith('That picture') ? err.message : 'That file isn\'t a picture this app can read.', 'warn');
-    }
-  });
   app.addEventListener('change', redraw);
   sheet.onClose = () => app.removeEventListener('change', redraw);
 

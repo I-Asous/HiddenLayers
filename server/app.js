@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +7,18 @@ import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
   waitForSpeech,
 } from './ai.js';
+import { createAdminRoutes } from './admin.js';
 import { DAY_MS, dayLabel, isDemoUser, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, COIN_PACKAGES, COSMETICS, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse,
+  COIN_PACKAGES, COSMETICS, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse,
   cosmeticCurrency, elementOf, matchup,
-  moodFor, newBattle, opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
+  moodFor, newBattle, opponentMove, pointsEarned, resolveRound, stageForLevel, streakFor, upgradeCosts,
 } from './game.js';
+import { loadRules } from './rules.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+// The admin dashboard is its own small site, kept apart from the game.
+const ADMIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'admin');
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -36,9 +40,6 @@ const BUDDY_COLUMNS = [
   'personality', 'rest_until',
 ];
 
-// Small enough to fit in a request, and only formats that are plain pictures (no SVG).
-const AVATAR_PATTERN = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]{1,8000}={0,2}$/;
-
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -48,6 +49,8 @@ class HttpError extends Error {
 
 export async function createApp({ dbFile, dataDir }) {
   const db = await openDb(dbFile);
+  // Prices, the battle bonus and rest times: defaults unless an admin changed them.
+  const rules = await loadRules(db);
   const ttsDir = path.join(dataDir, 'tts');
 
   // A personality whose voice was removed from VOICES gets regenerated on next talk.
@@ -159,6 +162,15 @@ export async function createApp({ dbFile, dataDir }) {
   // if it is ready now. Each beast rests on its own.
   const restingUntil = (beast) => (Number(beast.rest_until) > Date.now() ? Number(beast.rest_until) : null);
 
+  // The newest announcement still running, for the app to show each player once.
+  async function currentAnnouncement() {
+    const row = await db.get(`
+      SELECT id, message, created_at FROM announcements
+      WHERE expires_at IS NULL OR expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1
+    `, [Date.now()]);
+    return row ? { id: row.id, message: row.message, at: Number(row.created_at) } : null;
+  }
+
   async function state(userId, tz) {
     const user = await getUser(userId);
     const buddy = await getBuddy(userId);
@@ -167,7 +179,7 @@ export async function createApp({ dbFile, dataDir }) {
     return {
       user: {
         id: user.id, username: user.username, points: user.points, coins: user.coins,
-        totalSteps: user.total_steps, dailyGoal: user.daily_goal, avatar: user.avatar ?? null,
+        totalSteps: user.total_steps, dailyGoal: user.daily_goal,
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
@@ -177,6 +189,10 @@ export async function createApp({ dbFile, dataDir }) {
         .map((b) => ({ id: b.id, ...publicBuddy(b), xp: b.xp, personality: traitsOf(b), restingUntil: restingUntil(b) })),
       todaySteps: (await stepsByDay(db, userId, tz)).get(today) ?? 0,
       record: await record(userId),
+      // The demo shortcuts (instant steps, a simulated walk) only exist when the server was started for a demo.
+      demo: process.env.DEMO_MODE === '1',
+      rules: { battleWinBonus: rules.get('battleWinBonus') },
+      announcement: await currentAnnouncement(),
     };
   }
 
@@ -197,12 +213,12 @@ export async function createApp({ dbFile, dataDir }) {
     const winner = forfeit ? 'b' : battle.winner;
     const winnerId = winner === 'a' ? userId : winner === 'b' ? opponentId : null;
     await transaction(db, async (tx) => {
-      if (winnerId) await addPoints(tx, winnerId, BATTLE_WIN_BONUS);
+      if (winnerId) await addPoints(tx, winnerId, rules.get('battleWinBonus'));
       await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [winnerId === userId ? 10 : 2, userId]);
       // Only the beast that fought and lost has to rest; being beaten as the opponent costs nothing.
       if (winner === 'b') {
         await tx.run('UPDATE buddies SET rest_until = ? WHERE user_id = ?',
-          [Date.now() + restAfterLoss(sides.a.level), userId]);
+          [Date.now() + rules.restMs(stageForLevel(sides.a.level), sides.a.level), userId]);
       }
       await tx.run(`
         INSERT INTO battles (challenger_id, opponent_id, winner_id, challenger_damage, opponent_damage, log, created_at)
@@ -211,7 +227,7 @@ export async function createApp({ dbFile, dataDir }) {
     });
     return {
       outcome: winner === 'a' ? 'win' : winner === 'b' ? 'loss' : 'draw',
-      bonus: winner === 'a' ? BATTLE_WIN_BONUS : 0,
+      bonus: winner === 'a' ? rules.get('battleWinBonus') : 0,
     };
   }
 
@@ -237,7 +253,7 @@ export async function createApp({ dbFile, dataDir }) {
       (await getBuddy(userId, q)).species,
       ...(await q.all('SELECT species FROM resting_buddies WHERE user_id = ?', [userId])).map((b) => b.species),
     ]);
-    return EGGS.map((egg) => ({ ...egg, owned: owned.has(egg.species) }));
+    return EGGS.map((egg) => ({ ...egg, price: rules.get(`egg.${egg.species}`), owned: owned.has(egg.species) }));
   }
 
   function validUsername(value) {
@@ -263,7 +279,8 @@ export async function createApp({ dbFile, dataDir }) {
       const preset = presetById(body.personality);
       const token = randomBytes(24).toString('hex');
       const userId = await transaction(db, async (tx) => {
-        let user = await tx.get('SELECT id FROM users WHERE username = ?', [username]);
+        let user = await tx.get('SELECT id, banned_at FROM users WHERE username = ?', [username]);
+        if (user && user.banned_at !== null) throw new HttpError(403, 'This account is suspended');
         // The login screen asks for one or the other, so a typo can't hatch a
         // second buddy and a taken name can't drop a new player into an old account.
         if (body.mode === 'login' && !user) throw new HttpError(404, 'No buddy found for that username');
@@ -277,6 +294,7 @@ export async function createApp({ dbFile, dataDir }) {
         await tx.run('INSERT INTO auth_tokens (token, user_id, created_at) VALUES (?, ?, ?)', [token, user.id, Date.now()]);
         return user.id;
       });
+      markSeen(userId);
       ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
       return { token, ...await state(userId, tz) };
     },
@@ -307,13 +325,6 @@ export async function createApp({ dbFile, dataDir }) {
           throw new HttpError(400, 'Daily goal must be between 500 and 50,000 steps');
         }
         await db.run('UPDATE users SET daily_goal = ? WHERE id = ?', [goal, userId]);
-      }
-      // A profile picture arrives already shrunk by the app, as a data: URL; null removes it.
-      if (body.avatar !== undefined) {
-        if (body.avatar !== null && !AVATAR_PATTERN.test(String(body.avatar))) {
-          throw new HttpError(400, 'That picture can\'t be used. Try another one');
-        }
-        await db.run('UPDATE users SET avatar = ? WHERE id = ?', [body.avatar, userId]);
       }
       // The name and personality go to the beast walking with the player, or
       // to one of their resting beasts when beastId names it.
@@ -464,7 +475,7 @@ export async function createApp({ dbFile, dataDir }) {
         if (!item) throw new HttpError(404, 'No such item');
         const owned = await tx.get('SELECT 1 FROM owned_cosmetics WHERE user_id = ? AND cosmetic_id = ?', [userId, item.id]);
         if (owned) throw new HttpError(409, 'You already own that');
-        await (cosmeticCurrency(item.id) === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, item.price);
+        await (cosmeticCurrency(item.id) === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, rules.get(`price.${item.id}`));
         await tx.run('INSERT INTO owned_cosmetics (user_id, cosmetic_id, bought_at) VALUES (?, ?, ?)',
           [userId, item.id, Date.now()]);
       });
@@ -476,10 +487,9 @@ export async function createApp({ dbFile, dataDir }) {
       const egg = EGGS.find(({ species }) => species === body.species);
       if (!egg) throw new HttpError(404, 'No such egg');
       await transaction(db, async (tx) => {
-        if ((await storeEggs(userId, tx)).find(({ species }) => species === egg.species).owned) {
-          throw new HttpError(409, 'You already have that beast');
-        }
-        await (egg.currency === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, egg.price);
+        const listed = (await storeEggs(userId, tx)).find(({ species }) => species === egg.species);
+        if (listed.owned) throw new HttpError(409, 'You already have that beast');
+        await (egg.currency === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, listed.price);
         const name = egg.species[0].toUpperCase() + egg.species.slice(1);
         await tx.run('INSERT INTO resting_buddies (user_id, name, species) VALUES (?, ?, ?)', [userId, name, egg.species]);
       });
@@ -504,7 +514,7 @@ export async function createApp({ dbFile, dataDir }) {
         LEFT JOIN friendships f ON f.user_id = :id AND f.friend_id = b.user_id
         LEFT JOIN friend_requests sent ON sent.from_id = :id AND sent.to_id = b.user_id
         LEFT JOIN friend_requests got ON got.to_id = :id AND got.from_id = b.user_id
-        WHERE b.user_id != :id ORDER BY b.level DESC, u.username LIMIT 100
+        WHERE b.user_id != :id AND u.banned_at IS NULL ORDER BY b.level DESC, u.username LIMIT 100
       `, { id: userId })).map((row) => ({
         ...publicBuddy(row), userId: row.user_id, username: row.username, isFriend: Boolean(row.is_friend),
         friendStatus: row.is_friend ? 'friend' : row.is_incoming ? 'incoming' : row.is_requested ? 'requested' : null,
@@ -575,8 +585,8 @@ export async function createApp({ dbFile, dataDir }) {
             WHERE s.user_id = u.id AND s.timestamp >= :weekStart) AS steps,
           (SELECT COUNT(*) FROM battles bt WHERE bt.winner_id = u.id) AS wins
         FROM users u JOIN buddies b ON b.user_id = u.id
-        WHERE :everyone = 1 OR u.id = :id
-          OR u.id IN (SELECT friend_id FROM friendships WHERE user_id = :id)
+        WHERE u.banned_at IS NULL AND (:everyone = 1 OR u.id = :id
+          OR u.id IN (SELECT friend_id FROM friendships WHERE user_id = :id))
       `, { id: userId, weekStart, everyone: friendsOnly ? 0 : 1 });
       const value = (row) => row[board];
       rows.sort((a, b) => value(b) - value(a) || b.xp - a.xp || a.username.localeCompare(b.username));
@@ -774,9 +784,53 @@ export async function createApp({ dbFile, dataDir }) {
       LEFT JOIN owned_cosmetics o ON o.cosmetic_id = c.id AND o.user_id = ?
       ORDER BY c.sort
     `, [userId])).map((item) => ({
-      ...item, owned: Boolean(item.owned), currency: cosmeticCurrency(item.id),
+      ...item, price: rules.get(`price.${item.id}`), owned: Boolean(item.owned), currency: cosmeticCurrency(item.id),
       rarity: COSMETICS.find(({ id }) => id === item.id)?.rarity ?? null,
     }));
+  }
+
+  // The dashboard's API (see admin.js). Players have no passwords, so admin
+  // rights can't hang off an account: every call must carry the ADMIN_KEY from
+  // the server's environment. With no key set, the admin API doesn't exist.
+  // When each player's app last called in. Kept in memory for the dashboard's
+  // "online now", and written to the database at most once a minute per
+  // player so "last seen" survives a restart without a write on every request.
+  const lastSeen = new Map();
+  const SEEN_SAVE_MS = 60_000;
+  function markSeen(userId) {
+    const now = Date.now();
+    const saved = lastSeen.get(userId)?.saved ?? 0;
+    lastSeen.set(userId, { at: now, saved: now - saved >= SEEN_SAVE_MS ? now : saved });
+    if (now - saved >= SEEN_SAVE_MS) {
+      db.run('UPDATE users SET last_seen = ? WHERE id = ?', [now, userId]).catch((err) => console.error('[seen]', err.message));
+    }
+  }
+
+  const adminRoutes = createAdminRoutes({
+    db, rules, HttpError, validUsername,
+    seenAt: (userId) => lastSeen.get(userId)?.at ?? null,
+    // A player who was suspended or deleted mid-battle has nothing left to finish.
+    forgetPlayer: (userId) => {
+      liveBattles.delete(userId);
+      lastSeen.delete(userId);
+    },
+  });
+
+  // Hashing first makes the comparison constant-time whatever the lengths.
+  function isAdmin(req) {
+    const key = process.env.ADMIN_KEY;
+    if (!key) return false;
+    const digest = (value) => createHash('sha256').update(String(value)).digest();
+    return timingSafeEqual(digest(req.headers['x-admin-key'] ?? ''), digest(key));
+  }
+
+  async function handleAdminApi(req, res, url) {
+    if (!process.env.ADMIN_KEY) throw new HttpError(404, 'Not found');
+    if (!isAdmin(req)) throw new HttpError(401, 'Wrong admin key');
+    const route = adminRoutes[`${req.method} ${url.pathname}`];
+    if (!route) throw new HttpError(404, 'Not found');
+    const body = req.method === 'GET' ? {} : await readJson(req);
+    sendJson(res, 200, await route({ body, query: url.searchParams, tz: timezoneOf(req) }));
   }
 
   async function handleApi(req, res, url) {
@@ -785,12 +839,15 @@ export async function createApp({ dbFile, dataDir }) {
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
     let userId = null;
     if (!['/api/login', '/api/personalities', '/api/username'].includes(url.pathname)) {
-      const auth = token && await db.get('SELECT user_id FROM auth_tokens WHERE token = ?', [token]);
-      if (!auth) throw new HttpError(401, 'Please sign in');
+      const auth = token && await db.get(`
+        SELECT t.user_id, u.banned_at FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?
+      `, [token]);
+      // A suspended player's sessions are removed, so this is only a backstop.
+      if (!auth || auth.banned_at !== null) throw new HttpError(401, 'Please sign in');
       userId = auth.user_id;
+      markSeen(userId);
     }
-    const tzHeader = Number.parseInt(req.headers['x-tz-offset'], 10);
-    const tz = Number.isFinite(tzHeader) ? Math.max(-840, Math.min(840, tzHeader)) : 0;
+    const tz = timezoneOf(req);
     const body = req.method === 'GET' ? {} : await readJson(req);
     sendJson(res, 200, await route({ userId, token, tz, body, query: url.searchParams }));
   }
@@ -799,7 +856,13 @@ export async function createApp({ dbFile, dataDir }) {
     const url = new URL(req.url, 'http://localhost');
     try {
       if (url.pathname.startsWith('/api/tts/')) return await serveTts(res, ttsDir, url.pathname.slice(9));
+      if (url.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res, url);
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
+      if (url.pathname === '/admin') {
+        res.writeHead(302, { location: '/admin/' });
+        return res.end();
+      }
+      if (url.pathname.startsWith('/admin/')) return serveStatic(req, res, url.pathname.slice(6), ADMIN_DIR);
       return serveStatic(req, res, url.pathname);
     } catch (err) {
       if (!(err instanceof HttpError)) console.error(err);
@@ -826,6 +889,12 @@ function traitsOf(b) {
 }
 
 const presetById = (id) => PERSONALITY_PRESETS.find((p) => p.id === id) ?? null;
+
+// What Date#getTimezoneOffset() returned in the caller's browser, kept within real offsets.
+function timezoneOf(req) {
+  const minutes = Number.parseInt(req.headers['x-tz-offset'], 10);
+  return Number.isFinite(minutes) ? Math.max(-840, Math.min(840, minutes)) : 0;
+}
 
 function sendJson(res, status, data) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -855,7 +924,7 @@ async function serveTts(res, ttsDir, name) {
   createReadStream(file).pipe(res);
 }
 
-function serveStatic(req, res, pathname) {
+function serveStatic(req, res, pathname, dir = PUBLIC_DIR) {
   if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
   let relative;
   try {
@@ -864,8 +933,8 @@ function serveStatic(req, res, pathname) {
     throw new HttpError(400, 'Bad path');
   }
   if (relative.endsWith('/')) relative += 'index.html';
-  const file = path.join(PUBLIC_DIR, relative);
-  if (!file.startsWith(PUBLIC_DIR + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
+  const file = path.join(dir, relative);
+  if (!file.startsWith(dir + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
     throw new HttpError(404, 'Not found');
   }
   res.writeHead(200, {

@@ -25,4 +25,6 @@ server.listen(PORT, '0.0.0.0', () => {
   if (!process.env.GEMINI_API_KEY) console.log('  GEMINI_API_KEY not set — buddy uses built-in lines');
   if (!process.env.GOOGLE_MAPS_API_KEY) console.log('  GOOGLE_MAPS_API_KEY not set — the Map tab will ask for one');
   if (!process.env.ELEVENLABS_API_KEY) console.log('  ELEVENLABS_API_KEY not set — buddy uses the browser voice');
+  if (process.env.DEMO_MODE === '1') console.log('  DEMO_MODE is on — add ?demo=1 to the address for the demo shortcuts');
+  console.log(process.env.ADMIN_KEY ? `  Admin dashboard: http://localhost:${PORT}/admin/` : '  ADMIN_KEY not set — the admin dashboard is off');
 });

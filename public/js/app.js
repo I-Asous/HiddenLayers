@@ -148,6 +148,7 @@ function showApp() {
         </a>`).join('')}
     </nav>`;
   showTab(tabFromHash());
+  showAnnouncement();
 }
 
 function showTab(name) {
@@ -194,6 +195,42 @@ function refreshOnNewDay() {
   app.refresh().catch(() => { shownDay = null; });
 }
 setInterval(refreshOnNewDay, 30_000);
+
+// Announcements from the admins arrive with the server state. Each is shown
+// once per device, as soon as the app is open on its main screens.
+const ANNOUNCEMENT_KEY = 'stepbuddy.announcement-seen';
+function showAnnouncement() {
+  const announcement = app.state?.announcement;
+  if (!announcement || !document.getElementById('screen') || document.querySelector('.overlay')) return;
+  let seen = 0;
+  try {
+    seen = Number(localStorage.getItem(ANNOUNCEMENT_KEY)) || 0;
+  } catch {}
+  if (announcement.id <= seen) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay evolution';
+  overlay.innerHTML = `
+    <div class="evolution-card" role="dialog" aria-modal="true" aria-label="Announcement">
+      <p class="eyebrow">Announcement</p>
+      <p class="announcement"></p>
+      <button class="btn btn-primary btn-block">Got it</button>
+    </div>`;
+  // As text, never HTML: the message is whatever was typed into the dashboard.
+  overlay.querySelector('.announcement').textContent = announcement.message;
+  overlay.querySelector('button').addEventListener('click', () => {
+    try {
+      localStorage.setItem(ANNOUNCEMENT_KEY, String(announcement.id));
+    } catch {}
+    overlay.remove();
+    showAnnouncement(); // a newer one may have arrived while this was open
+  });
+  document.body.append(overlay);
+}
+app.addEventListener('change', showAnnouncement);
+// A player who leaves the app open still hears about a new one within a couple of minutes.
+setInterval(() => {
+  if (app.state && document.visibilityState === 'visible') app.refresh().catch(() => {});
+}, 120_000);
 
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

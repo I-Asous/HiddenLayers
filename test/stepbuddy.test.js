@@ -696,24 +696,6 @@ test('players choose a personality at sign-up and can change it', async () => {
   db.close();
 });
 
-test('a profile picture is a small jpeg, png or webp data URL and can be removed', async () => {
-  const login = (await call('POST', '/login', { username: 'poser' }, null)).data;
-  const auth = login.token;
-  assert.equal(login.user.avatar, null);
-  const picture = `data:image/jpeg;base64,${Buffer.from('not really a jpeg').toString('base64')}`;
-  assert.equal((await call('PATCH', '/me', { avatar: picture }, auth)).data.user.avatar, picture);
-  assert.equal((await call('GET', '/me', null, auth)).data.user.avatar, picture);
-
-  for (const bad of [
-    'https://example.com/me.jpg', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:text/html;base64,PGI+', 42,
-    `data:image/png;base64,${'A'.repeat(8004)}`, 'data:image/png;base64,"><script>',
-  ]) {
-    assert.equal((await call('PATCH', '/me', { avatar: bad }, auth)).status, 400, String(bad).slice(0, 30));
-  }
-  assert.equal((await call('GET', '/me', null, auth)).data.user.avatar, picture);
-  assert.equal((await call('PATCH', '/me', { avatar: null }, auth)).data.user.avatar, null);
-});
-
 test('a resting beast can be renamed and given a personality, but only by its owner', async () => {
   const login = (await call('POST', '/login', { username: 'keeper' }, null)).data;
   const auth = login.token;
@@ -991,6 +973,323 @@ test('leaderboard ranks by steps, wins or level, for friends or everyone', async
   const wins = (await call('GET', '/leaderboard?board=wins&scope=all')).data;
   assert.equal(wins.board, 'wins');
   assert.equal((await call('GET', '/leaderboard?board=nonsense')).data.board, 'steps');
+});
+
+test('admin: the dashboard API needs the server\'s key, lists every player and gifts currency', async () => {
+  const admin = async (method, route, body, key) => {
+    const res = await fetch(base + route, {
+      method,
+      headers: { 'content-type': 'application/json', ...(key ? { 'x-admin-key': key } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json() };
+  };
+  const saved = process.env.ADMIN_KEY;
+  try {
+    // With no key configured there is no admin API at all.
+    delete process.env.ADMIN_KEY;
+    assert.equal((await admin('GET', '/admin/players', null, 'anything')).status, 404);
+
+    process.env.ADMIN_KEY = 'test-admin-key';
+    assert.equal((await admin('GET', '/admin/players')).status, 401);
+    assert.equal((await admin('GET', '/admin/players', null, 'test-admin-ke')).status, 401);
+    // A player's own session is not an admin key.
+    assert.equal((await call('GET', '/admin/players')).status, 401);
+    assert.equal((await admin('POST', '/admin/gift', { userId: 1, points: 5 }, 'wrong')).status, 401);
+
+    const { players } = (await admin('GET', '/admin/players', null, 'test-admin-key')).data;
+    const me = (await call('GET', '/me')).data;
+    const row = players.find((p) => p.id === me.user.id);
+    assert.deepEqual(
+      [row.username, row.points, row.diamonds, row.totalSteps, row.buddy.name, row.beasts],
+      ['walker', me.user.points, me.user.coins, me.user.totalSteps, me.buddy.name, me.resting.length + 1],
+    );
+    assert.deepEqual([row.wins, row.losses, row.draws], [me.record.wins, me.record.losses, me.record.draws]);
+    assert.equal(row.weekSteps, 24600);
+    assert.ok(players.find((p) => p.username === 'mira').demo);
+    assert.ok(players.length >= 10);
+
+    const gift = (body) => admin('POST', '/admin/gift', body, 'test-admin-key');
+    const given = await gift({ userId: me.user.id, points: 250, diamonds: 40 });
+    assert.deepEqual([given.data.points, given.data.diamonds], [me.user.points + 250, me.user.coins + 40]);
+    assert.equal((await gift({ userId: me.user.id, diamonds: 10 })).data.diamonds, me.user.coins + 50);
+    const after = (await call('GET', '/me')).data.user;
+    assert.deepEqual([after.points, after.coins], [me.user.points + 250, me.user.coins + 50]);
+    const listed = (await admin('GET', '/admin/players', null, 'test-admin-key')).data.players.find((p) => p.id === me.user.id);
+    assert.deepEqual(listed.gifted, { points: 250, diamonds: 50 });
+
+    for (const bad of [
+      { userId: me.user.id }, { userId: me.user.id, points: 0, diamonds: 0 },
+      { userId: me.user.id, points: 1.5 }, { userId: me.user.id, diamonds: 1_000_001 }, { userId: me.user.id, points: 'lots' },
+    ]) {
+      assert.equal((await gift(bad)).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await gift({ userId: 999999, points: 5 })).status, 404);
+    assert.equal((await gift({ userId: '1 OR 1=1', points: 5 })).status, 404);
+    assert.deepEqual((await call('GET', '/me')).data.user.points, me.user.points + 250);
+
+    // A negative amount takes currency back, but never below zero.
+    assert.equal((await gift({ userId: me.user.id, points: -50, diamonds: -10 })).data.points, me.user.points + 200);
+    assert.equal((await gift({ userId: me.user.id, diamonds: -1_000_000 })).status, 409);
+    assert.equal((await call('GET', '/me')).data.user.coins, me.user.coins + 40);
+
+    // The dashboard itself is a separate little site under /admin/.
+    const page = await fetch(base.replace('/api', '/admin/'));
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /StepBuddy Admin/);
+    assert.equal((await fetch(base.replace('/api', '/admin/admin.js'))).status, 200);
+    assert.equal((await fetch(base.replace('/api', '/admin/..%2Fserver%2Fapp.js'))).status, 404);
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_KEY;
+    else process.env.ADMIN_KEY = saved;
+  }
+});
+
+test('admin: fixing accounts, handing things out, tuning the game, and a log of it all', async () => {
+  const saved = process.env.ADMIN_KEY;
+  process.env.ADMIN_KEY = 'test-admin-key';
+  const admin = async (method, route, body) => {
+    const res = await fetch(base + route, {
+      method, headers: { 'content-type': 'application/json', 'x-admin-key': 'test-admin-key' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json() };
+  };
+  const join = async (username) => {
+    const { data } = await call('POST', '/login', { username }, null);
+    return { auth: data.token, id: data.user.id, species: data.buddy.species };
+  };
+  try {
+    const [rule, bystander] = [await join('rulebreaker'), await join('bystander')];
+    const detail = async (who = rule) => (await admin('GET', `/admin/player?id=${who.id}`)).data;
+    assert.equal((await admin('GET', '/admin/player?id=999999')).status, 404);
+
+    // Handing out an item and a beast, once each.
+    const catalog = (await admin('GET', '/admin/catalog')).data;
+    assert.equal(catalog.items.length, COSMETICS.length);
+    assert.equal((await admin('POST', '/admin/give-item', { userId: rule.id, itemId: 'crown' })).status, 200);
+    assert.equal((await admin('POST', '/admin/give-item', { userId: rule.id, itemId: 'crown' })).status, 409);
+    assert.equal((await admin('POST', '/admin/give-item', { userId: rule.id, itemId: 'nope' })).status, 404);
+    const spare = SPECIES.find((id) => id !== rule.species);
+    assert.equal((await admin('POST', '/admin/give-beast', { userId: rule.id, species: spare })).status, 200);
+    assert.equal((await admin('POST', '/admin/give-beast', { userId: rule.id, species: spare })).status, 409);
+    assert.equal((await admin('POST', '/admin/give-beast', { userId: rule.id, species: rule.species })).status, 409);
+    assert.equal((await call('POST', '/buddy/equip', { slot: 'hat', itemId: 'crown' }, rule.auth)).status, 200);
+
+    // Fixing a beast: stats, name, and a rest that should be over.
+    const lost = (await call('POST', '/battles', { opponentId: 1 }, rule.auth)).data.battle;
+    await call('POST', '/battles/forfeit', { battleId: lost.id }, rule.auth);
+    assert.ok((await detail()).beasts[0].restingUntil);
+    await admin('POST', '/admin/beast', { userId: rule.id, clearRest: true, level: 12, attack: 9, name: ' Fixed ' });
+    const fixed = (await call('GET', '/me', null, rule.auth)).data.buddy;
+    assert.deepEqual([fixed.name, fixed.level, fixed.stage, fixed.attack, fixed.restingUntil], ['Fixed', 12, 'teen', 9, null]);
+    const restingId = (await detail()).beasts[1].id;
+    await admin('POST', '/admin/beast', { userId: rule.id, beastId: restingId, evasion: 7 });
+    assert.equal((await detail()).beasts[1].evasion, 7);
+    assert.equal((await admin('POST', '/admin/beast', { userId: rule.id, level: 101 })).status, 400);
+    assert.equal((await admin('POST', '/admin/beast', { userId: bystander.id, beastId: restingId, level: 2 })).status, 404);
+    assert.equal((await admin('POST', '/admin/beast', { userId: rule.id })).status, 400);
+
+    // The detail view gathers it all.
+    const seen = await detail();
+    assert.deepEqual(seen.items.map((item) => item.id), ['crown']);
+    assert.deepEqual([seen.beasts.length, seen.battles[0].outcome, seen.battles[0].other], [2, 'loss', 'mira']);
+    assert.ok(seen.log.some((entry) => entry.action === 'beast' && /level 1 to 12/.test(entry.detail)));
+
+    // A walk reported faster than anyone walks is flagged; an honest one isn't.
+    await call('POST', '/steps/sync', { sessionId: 'session-honest', total: 80 }, bystander.auth);
+    await call('POST', '/steps/sync', { sessionId: 'session-cheat', total: 50 }, rule.auth);
+    await call('POST', '/steps/sync', { sessionId: 'session-cheat', total: 90_050 }, rule.auth);
+    const { flags } = (await admin('GET', '/admin/suspicious')).data;
+    assert.ok(flags.some((flag) => flag.userId === rule.id && flag.steps === 90_000 && flag.points === 900));
+    assert.ok(!flags.some((flag) => flag.userId === bystander.id));
+    const rows = (await admin('GET', '/admin/players')).data.players;
+    assert.ok(rows.find((p) => p.id === rule.id).flags >= 1);
+    assert.equal(rows.find((p) => p.id === bystander.id).flags, 0);
+
+    // Renaming: valid, free names only.
+    assert.equal((await admin('POST', '/admin/rename', { userId: rule.id, username: 'bystander' })).status, 409);
+    assert.equal((await admin('POST', '/admin/rename', { userId: rule.id, username: 'no spaces' })).status, 400);
+    assert.equal((await admin('POST', '/admin/rename', { userId: 1, username: 'not_mira' })).status, 409);
+    assert.equal((await admin('POST', '/admin/rename', { userId: rule.id, username: 'reformed' })).status, 200);
+    assert.equal((await call('GET', '/me', null, rule.auth)).data.user.username, 'reformed');
+
+    // Signing out everywhere ends the session but the account still works.
+    assert.equal((await admin('POST', '/admin/signout', { userId: rule.id })).data.sessions, 1);
+    assert.equal((await call('GET', '/me', null, rule.auth)).status, 401);
+    rule.auth = (await call('POST', '/login', { username: 'reformed', mode: 'login' }, null)).data.token;
+
+    // Suspending signs them out, keeps them out and hides them from other players.
+    const listed = async () => (await call('GET', '/opponents', null, bystander.auth)).data.opponents.some((o) => o.username === 'reformed');
+    assert.equal(await listed(), true);
+    assert.equal((await admin('POST', '/admin/suspend', { userId: rule.id, suspended: true })).status, 200);
+    assert.equal((await call('GET', '/me', null, rule.auth)).status, 401);
+    const refused = await call('POST', '/login', { username: 'reformed', mode: 'login' }, null);
+    assert.deepEqual([refused.status, refused.data.error], [403, 'This account is suspended']);
+    assert.equal(await listed(), false);
+    assert.ok(!(await call('GET', '/leaderboard?scope=all', null, bystander.auth)).data.entries.some((e) => e.username === 'reformed'));
+    assert.equal((await admin('POST', '/admin/suspend', { userId: 1, suspended: true })).status, 409);
+    await admin('POST', '/admin/suspend', { userId: rule.id, suspended: false });
+    rule.auth = (await call('POST', '/login', { username: 'reformed', mode: 'login' }, null)).data.token;
+    assert.equal(await listed(), true);
+
+    // A gift to everyone skips demo accounts unless asked.
+    const before = (await admin('GET', '/admin/players')).data.players;
+    const all = (await admin('POST', '/admin/gift-all', { points: 7 })).data;
+    assert.equal(all.players, before.filter((p) => !p.demo).length);
+    const after = (await admin('GET', '/admin/players')).data.players;
+    for (const p of before) assert.equal(after.find((a) => a.id === p.id).points, p.points + (p.demo ? 0 : 7), p.username);
+    assert.equal((await admin('POST', '/admin/gift-all', { points: -7 })).status, 400);
+
+    // Settings change the game at once and go back to their defaults.
+    const settings = (await admin('GET', '/admin/settings')).data.settings;
+    assert.ok(settings.every((rule) => rule.value === rule.default && !rule.changed));
+    await admin('POST', '/admin/settings', { name: 'price.party-hat', amount: 3 });
+    await admin('POST', '/admin/settings', { name: 'battleWinBonus', amount: 12 });
+    await admin('POST', '/admin/settings', { name: 'rest.egg', amount: 600 });
+    await admin('POST', '/admin/settings', { name: 'egg.kappa', amount: 1 });
+    const store = (await call('GET', '/store', null, bystander.auth)).data;
+    assert.equal(store.items.find((item) => item.id === 'party-hat').price, 3);
+    assert.equal(store.eggs.find((egg) => egg.species === 'kappa').price, 1);
+    const wallet = (await call('GET', '/me', null, bystander.auth)).data;
+    assert.equal(wallet.rules.battleWinBonus, 12);
+    assert.equal((await call('POST', '/store/buy', { itemId: 'party-hat' }, bystander.auth)).data.user.points, wallet.user.points - 3);
+    const battle = (await call('POST', '/battles', { opponentId: 1 }, bystander.auth)).data.battle;
+    const fled = (await call('POST', '/battles/forfeit', { battleId: battle.id }, bystander.auth)).data;
+    assert.ok(Math.abs(fled.buddy.restingUntil - Date.now() - 605_000) < 5000);
+    assert.equal((await admin('POST', '/admin/settings', { name: 'battleWinBonus', amount: -1 })).status, 400);
+    assert.equal((await admin('POST', '/admin/settings', { name: 'battleWinBonus', amount: 2.5 })).status, 400);
+    assert.equal((await admin('POST', '/admin/settings', { name: 'nonsense', amount: 1 })).status, 404);
+    assert.equal((await admin('POST', '/admin/settings', { name: 'constructor', amount: 1 })).status, 404);
+    for (const name of ['price.party-hat', 'battleWinBonus', 'rest.egg', 'egg.kappa']) {
+      assert.equal((await admin('POST', '/admin/settings', { name, amount: null })).data.setting.changed, false);
+    }
+    assert.equal((await call('GET', '/store', null, bystander.auth)).data.items.find((item) => item.id === 'party-hat').price, 5);
+
+    // Activity and the economy add up.
+    const { days } = (await admin('GET', '/admin/activity')).data;
+    assert.equal(days.length, 30);
+    assert.ok(days.at(-1).signups >= 2 && days.at(-1).steps >= 90_130 && days.at(-1).walkers >= 2 && days.at(-1).battles >= 2);
+    const economy = (await admin('GET', '/admin/economy')).data;
+    const everyone = (await admin('GET', '/admin/players')).data.players;
+    assert.equal(economy.held.points, everyone.reduce((sum, p) => sum + p.points, 0));
+    assert.ok(economy.items.find((item) => item.id === 'crown').owned >= 1);
+    assert.ok(economy.gifted.points >= 7);
+
+    // Deleting needs the username typed, then removes every trace.
+    assert.equal((await admin('POST', '/admin/delete', { userId: rule.id, confirm: 'wrong' })).status, 400);
+    assert.equal((await admin('POST', '/admin/delete', { userId: 1, confirm: 'mira' })).status, 409);
+    assert.equal((await admin('POST', '/admin/delete', { userId: rule.id, confirm: 'Reformed' })).status, 200);
+    assert.equal((await call('GET', '/me', null, rule.auth)).status, 401);
+    assert.equal((await admin('GET', `/admin/player?id=${rule.id}`)).status, 404);
+    assert.equal(await listed(), false);
+    const db = new DatabaseSync(dbFile);
+    for (const [table, column] of [['buddies', 'user_id'], ['resting_buddies', 'user_id'], ['step_events', 'user_id'],
+      ['battles', 'challenger_id'], ['owned_cosmetics', 'user_id'], ['auth_tokens', 'user_id']]) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = ?`).get(rule.id).n, 0, table);
+    }
+    db.close();
+    // The name is free again, as a brand new player.
+    assert.equal((await call('POST', '/login', { username: 'reformed', mode: 'signup' }, null)).data.user.totalSteps, 0);
+
+    // Everything above was written down.
+    const actions = (await admin('GET', '/admin/log')).data.entries.map((entry) => entry.action);
+    for (const action of ['give-item', 'give-beast', 'beast', 'rename', 'signout', 'suspend', 'unsuspend', 'gift-all', 'setting', 'delete']) {
+      assert.ok(actions.includes(action), action);
+    }
+    const deleted = (await admin('GET', '/admin/log')).data.entries.find((entry) => entry.action === 'delete');
+    assert.equal(deleted.username, 'reformed');
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_KEY;
+    else process.env.ADMIN_KEY = saved;
+  }
+});
+
+test('admin: an announcement reaches every player until it ends or is stopped', async () => {
+  const saved = process.env.ADMIN_KEY;
+  process.env.ADMIN_KEY = 'test-admin-key';
+  const admin = async (method, route, body) => {
+    const res = await fetch(base + route, {
+      method, headers: { 'content-type': 'application/json', 'x-admin-key': 'test-admin-key' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json() };
+  };
+  const seen = async () => (await call('GET', '/me')).data.announcement;
+  try {
+    assert.equal(await seen(), null);
+    assert.equal((await admin('POST', '/admin/announce', { message: '   ' })).status, 400);
+    assert.equal((await admin('POST', '/admin/announce', { message: 'x'.repeat(301) })).status, 400);
+    assert.equal((await admin('POST', '/admin/announce', { message: 'hi', hours: 0 })).status, 400);
+    assert.equal((await call('POST', '/admin/announce', { message: 'I am a player' })).status, 401);
+
+    assert.equal((await admin('POST', '/admin/announce', { message: ' Double points this weekend! ', hours: 24 })).status, 200);
+    const first = await seen();
+    assert.equal(first.message, 'Double points this weekend!');
+    // Every player gets it, in every answer that carries their state.
+    const other = (await call('POST', '/login', { username: 'latecomer' }, null)).data;
+    assert.equal(other.announcement.id, first.id);
+
+    // A newer one takes its place; stopping that brings the older one back.
+    await admin('POST', '/admin/announce', { message: '<b>Maintenance</b> at noon' });
+    const second = await seen();
+    assert.ok(second.id > first.id);
+    assert.equal(second.message, '<b>Maintenance</b> at noon');
+    const { announcements } = (await admin('GET', '/admin/announcements')).data;
+    assert.deepEqual(announcements.slice(0, 2).map((a) => [a.id, a.active, a.expiresAt === null]),
+      [[second.id, true, true], [first.id, true, false]]);
+    assert.equal((await admin('POST', '/admin/announce/stop', { id: second.id })).status, 200);
+    assert.equal((await seen()).id, first.id);
+    assert.equal((await admin('POST', '/admin/announce/stop', { id: 999999 })).status, 404);
+
+    // One that has run its time is no longer shown.
+    const db = new DatabaseSync(dbFile);
+    db.prepare('UPDATE announcements SET expires_at = ? WHERE id = ?').run(Date.now() - 1, first.id);
+    db.close();
+    assert.equal(await seen(), null);
+    assert.ok((await admin('GET', '/admin/announcements')).data.announcements.every((a) => !a.active));
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_KEY;
+    else process.env.ADMIN_KEY = saved;
+  }
+});
+
+test('admin: players whose app called in recently show as online', async () => {
+  const saved = process.env.ADMIN_KEY;
+  process.env.ADMIN_KEY = 'test-admin-key';
+  try {
+    const here = (await call('POST', '/login', { username: 'present' }, null)).data;
+    await call('GET', '/me', null, here.token);
+    const players = (await (await fetch(`${base}/admin/players`, { headers: { 'x-admin-key': 'test-admin-key' } })).json()).players;
+    const row = players.find((p) => p.id === here.user.id);
+    assert.equal(row.online, true);
+    assert.ok(Date.now() - row.lastSeen < 5000);
+    // Nobody is playing the demo accounts.
+    const theo = players.find((p) => p.username === 'theo');
+    assert.deepEqual([theo.online, theo.lastSeen], [false, null]);
+    // The time is also written down, so it survives a restart.
+    const db = new DatabaseSync(dbFile);
+    assert.ok(db.prepare('SELECT last_seen FROM users WHERE id = ?').get(here.user.id).last_seen > 0);
+    db.close();
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_KEY;
+    else process.env.ADMIN_KEY = saved;
+  }
+});
+
+test('demo shortcuts are only offered when the server runs in demo mode', async () => {
+  const saved = process.env.DEMO_MODE;
+  try {
+    delete process.env.DEMO_MODE;
+    assert.equal((await call('GET', '/me')).data.demo, false);
+    process.env.DEMO_MODE = 'yes'; // only exactly 1 turns it on
+    assert.equal((await call('GET', '/me')).data.demo, false);
+    process.env.DEMO_MODE = '1';
+    assert.equal((await call('GET', '/me')).data.demo, true);
+  } finally {
+    if (saved === undefined) delete process.env.DEMO_MODE;
+    else process.env.DEMO_MODE = saved;
+  }
 });
 
 test('the map key comes from the server environment', async () => {

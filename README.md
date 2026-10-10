@@ -63,8 +63,24 @@ Every key is optional. Each one you leave out swaps in a fallback, so the app st
 | `GOOGLE_MAPS_API_KEY` | The Map tab | Map tab asks for a key |
 | `GOOGLE_MAPS_MAP_ID` | Tilted 3D map with buildings | Flat retro-styled map |
 | `TIGER_DATABASE_URL` | Tiger Data (Postgres) as the database | Local SQLite |
+| `DEMO_MODE` | Set to `1` to allow the demo shortcuts (instant steps, simulated walk) for anyone who opens the app with `?demo=1` | Shortcuts off |
+| `ADMIN_KEY` | Turns on the admin dashboard at `/admin/` and is the key that opens it | Dashboard off |
 
 If `TIGER_DATABASE_URL` is set but unreachable at startup (for example, the service is paused), the server logs it and falls back to SQLite.
+
+## Admin dashboard
+
+Open `/admin/` on the server and enter the `ADMIN_KEY` from `.env`. It has six tabs:
+
+- **Players**: everyone with their balances, steps, beast, battle record and friends, and who is online now; search, sort, export to CSV, gift everyone at once. Open a player to see their beasts, items, walks, battles and friends, and to gift or take currency, give an item or a beast, fix a beast's level, stats or rest, rename them, sign them out everywhere, suspend them or delete the account.
+- **Activity**: new players, players who walked, steps and battles per day for the last 30 days.
+- **Economy**: currency held, earned and gifted, and which items and beasts players have.
+- **Flags**: walk reports that arrived faster than anyone walks. Step counts are taken on trust, so this is where to look for faked ones.
+- **Settings**: store prices, the battle win bonus and rest times, changed without touching the code (the defaults are in `server/game.js`).
+- **Announce**: send a message to every player. It pops up once in their app; it can run for a set time or until stopped.
+- **Log**: every action taken from the dashboard.
+
+Players sign in with a username and no password, so the key is the only thing guarding the dashboard: keep it secret, use a long random one, and serve the app over HTTPS anywhere but your own machine.
 
 ## Project layout
 
@@ -75,6 +91,8 @@ server/
   game.js       pure game rules: points, levels, moods, battles, store items
   db.js         one interface over Tiger Data (Postgres) or SQLite, plus seeding
   ai.js         Gemini personalities/lines and ElevenLabs voice
+  admin.js      the admin dashboard's API
+  rules.js      prices, bonuses and rest times an admin can change
 public/
   index.html, manifest.webmanifest, sw.js   PWA shell and offline cache
   js/app.js     tab router
@@ -84,6 +102,7 @@ public/
   js/fx.js      confetti, voice playback, sound effects
   sounds/       punch, miss, win and lose effects
   models/       3D buddy model for the map
+admin/          the admin dashboard, a separate small site served at /admin/
 scripts/        generate icons and the 3D buddy model
 test/           node --test suite
 ```

@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { SPECIES, buddySvg, cosmeticIcon, stageName } from '../buddy.js';
-import { avatarHtml, buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
+import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
@@ -101,7 +101,7 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <button class="chip" id="profile-btn" aria-label="Open profile">
-          ${avatarHtml(user)}
+          <span class="avatar">${escapeHtml(user.username[0].toUpperCase())}</span>
           <span class="chip-text"><b>${escapeHtml(user.username)}</b></span>
         </button>
         <div class="topbar-balances">

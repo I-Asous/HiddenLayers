@@ -17,6 +17,17 @@ export const VOICES = {
   posh: { id: 'nDJIICjR9zfJExIFeSCN', desc: 'warm, proper, a little posh' },
   gravelly: { id: 'wo6udizrrtpIxWGp2qJk', desc: 'husky, gravelly, grumpy' },
   military: { id: 'DGzg6RaUqxGRTHSBjfgF', desc: 'stern, commanding, military', neverTags: ['giggles'] },
+  // Expressive character voices from the ElevenLabs library, each with its own accent.
+  rio: { id: 'RwxnXycZivqX0ua10Yoh', desc: 'energetic, playful, Jamaican accent' },
+  thiago: { id: 'modjMReDNm0j63qLxDEA', desc: 'warm, expressive, Brazilian accent' },
+  mick: { id: '2GErPEnQqbyeqhZQPM6r', desc: 'expressive, enthusiastic, Irish accent' },
+  adam: { id: 'U5UjeJMsOvyhYhXfZdvZ', desc: 'old, deep, gravelly storyteller, Scottish accent' },
+  furkan: { id: 'spa9IALJDrGWqKYWII2J', desc: 'excited, joyful, Turkish accent' },
+  dev: { id: '5J8HNhWkTAhN2YWsd9Ta', desc: 'cute, youthful, energetic, Korean accent' },
+  taro: { id: 'UznIBkKIQe3ZG2tGydre', desc: 'upbeat, youthful, friendly, Japanese accent' },
+  antonio: { id: 's2wvuS7SwITYg8dqsJdn', desc: 'old, grumpy grandpa, Italian accent' },
+  gemnda: { id: 'ST4Vi99wlPuZ5NR9ANmt', desc: 'rich, vibrant, commanding, Nigerian accent' },
+  krishna: { id: 'WoB1yCV3pS7cFlDlu8ZU', desc: 'energetic, witty, Indian accent' },
 };
 
 // What players pick from, and what "Surprise me" falls back to when there is
@@ -30,6 +41,17 @@ export const PERSONALITY_PRESETS = [
   { id: 'sage', name: 'Sage', traits: ['Wise', 'Patient', 'Nosy'], quirk: 'Has a proverb for everything', style: 'talks like an ancient sage', voice: 'grampa' },
   { id: 'surfer', name: 'Surfer', traits: ['Sunny', 'Adventurous', 'Laid-back'], quirk: 'Calls everyone mate', style: 'chats like a friendly surfer', voice: 'australian' },
   { id: 'sergeant', name: 'Sergeant', traits: ['Disciplined', 'Bold', 'Strict'], quirk: 'Salutes every tree', style: 'barks orders like a drill sergeant', voice: 'military' },
+  // Named after their voice: players see the name and the traits, not the accent.
+  { id: 'rio', name: 'Uncle Rio', traits: ['Playful', 'Upbeat', 'Cheeky'], quirk: 'Laughs at its own jokes', style: 'jokes around and keeps things light', voice: 'rio' },
+  { id: 'thiago', name: 'Thiago', traits: ['Warm', 'Cheerful', 'Encouraging'], quirk: 'Hums while it walks', style: 'talks warmly, like an old friend', voice: 'thiago' },
+  { id: 'mick', name: 'Mick', traits: ['Enthusiastic', 'Chatty', 'Good-humoured'], quirk: 'Gets excited about small things', style: 'talks with big, cheerful enthusiasm', voice: 'mick' },
+  { id: 'adam', name: 'Adam', traits: ['Wise', 'Gruff', 'Proud'], quirk: 'Remembers when this was all fields', style: 'speaks like a seasoned old storyteller', voice: 'adam' },
+  { id: 'furkan', name: 'Furkan', traits: ['Excited', 'Joyful', 'Loud'], quirk: 'Cheers for every single step', style: 'bursts with excitement', voice: 'furkan' },
+  { id: 'dev', name: 'Dev', traits: ['Cute', 'Energetic', 'Wholesome'], quirk: 'Narrates walks like a livestream', style: 'talks like a cheerful streamer', voice: 'dev' },
+  { id: 'taro', name: 'Taro', traits: ['Upbeat', 'Friendly', 'Earnest'], quirk: 'Always tries its very best', style: 'speaks in an upbeat, earnest way', voice: 'taro' },
+  { id: 'antonio', name: 'Antonio', traits: ['Grumpy', 'Nostalgic', 'Soft-hearted'], quirk: 'Says things were better before', style: 'grumbles like a nostalgic grandpa', voice: 'antonio' },
+  { id: 'gemnda', name: 'Gemnda', traits: ['Bold', 'Vibrant', 'Proud'], quirk: 'Announces every arrival', style: 'speaks in a rich, commanding voice', voice: 'gemnda' },
+  { id: 'krishna', name: 'Krishna', traits: ['Witty', 'Energetic', 'Thoughtful'], quirk: 'Asks big questions mid-walk', style: 'muses out loud with energy and wit', voice: 'krishna' },
 ];
 
 const EVENT_PROMPTS = {
