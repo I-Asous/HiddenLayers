@@ -550,8 +550,8 @@ input::placeholder { color: var(--slate); }
 .map-empty[hidden] { display: none; }
 .map > div { width: 100%; height: 100%; }
 
-/* The character's own canvas in the retro look, centred on the map centre. */
-.map-buddy { position: absolute; top: 50%; left: 50%; z-index: 1; width: 260px; height: 260px; transform: translate(-50%, -50%); image-rendering: pixelated; pointer-events: none; }
+/* The characters' own canvas in the retro look, laid over the whole map. */
+.map-buddy { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
 .map-buddy[hidden] { display: none; }
 
 .map-card {
@@ -653,6 +653,52 @@ input::placeholder { color: var(--slate); }
 }
 
 .map-controls .btn { flex: 1; padding-inline: 8px; }
+.map-controls[hidden] { display: none; }
+
+/* A nearby player's tap area: over their model, feet on their map position, name tag on top. */
+.map-player {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 56px;
+  height: 72px;
+  padding: 0;
+  border: 0;
+  background: none;
+  transform: translate(-50%, -100%);
+  cursor: pointer;
+}
+.map-player span {
+  padding: 3px 4px 2px;
+  background: var(--dark);
+  border: 2px solid var(--ink);
+  color: var(--yellow);
+  font-family: var(--pixel);
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+/* The player being looked at: their profile, over the walk controls. */
+.map-profile {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 40px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--panel);
+  border: var(--border);
+}
+.map-profile[hidden] { display: none; }
+.map-profile-head { display: flex; align-items: center; gap: var(--s3); }
+.map-profile-head .opponent-art { width: 64px; }
+.map-profile-stats { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.map-profile-actions { display: flex; align-items: center; gap: 10px; }
+.map-profile-actions .btn { flex: 1; padding-inline: 8px; }
 
 /* ---------- Store ---------- */
 

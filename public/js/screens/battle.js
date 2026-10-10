@@ -251,7 +251,7 @@ const FALLBACK_LINES = {
 };
 
 /** Replays the server's turn-by-turn log. Resolves when the player closes the result. */
-function playBattle(battle) {
+export function playBattle(battle) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'overlay arena';

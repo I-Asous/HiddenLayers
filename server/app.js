@@ -7,7 +7,8 @@ import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, buddyLine, generatePersonality, isBuddyEvent, situationFor, startSpeech,
   waitForSpeech,
 } from './ai.js';
-import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
+import { DAY_MS, DEMO_USERNAMES, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
+import { distanceM } from '../public/js/geo.js';
 import {
   BATTLE_WIN_BONUS, COIN_PACKAGES, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
   streakFor, upgradeCosts,
@@ -27,6 +28,12 @@ const MIME = {
   '.glb': 'model/gltf-binary',
 };
 const MAX_SESSION_STEPS = 200_000;
+// Players show up on each other's maps within this distance, while their
+// position is this fresh.
+const NEARBY_RADIUS_M = 1000;
+const NEARBY_FRESH_MS = 120_000;
+// Demo: where the seeded buddies stand around you, in metres [north, east].
+const DEMO_OFFSETS_M = [[60, 40], [-90, 70], [30, -120]];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -152,7 +159,7 @@ export async function createApp({ dbFile, dataDir }) {
     return {
       user: {
         id: user.id, username: user.username, points: user.points, coins: user.coins,
-        totalSteps: user.total_steps, dailyGoal: user.daily_goal,
+        totalSteps: user.total_steps, dailyGoal: user.daily_goal, mapVisible: Boolean(user.map_visible),
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
@@ -246,6 +253,12 @@ export async function createApp({ dbFile, dataDir }) {
         if (!name) throw new HttpError(400, 'Your buddy needs a name');
         await db.run('UPDATE buddies SET name = ? WHERE user_id = ?', [name, userId]);
       }
+      if (body.mapVisible !== undefined) {
+        if (typeof body.mapVisible !== 'boolean') throw new HttpError(400, 'mapVisible must be true or false');
+        await db.run('UPDATE users SET map_visible = ? WHERE id = ?', [body.mapVisible ? 1 : 0, userId]);
+        // Hiding takes you off friends' maps now, not when your last position goes stale.
+        if (!body.mapVisible) await db.run('DELETE FROM locations WHERE user_id = ?', [userId]);
+      }
       // A preset id, or 'surprise' for a fresh invented one.
       if (body.personality !== undefined) {
         const preset = presetById(body.personality);
@@ -294,6 +307,8 @@ export async function createApp({ dbFile, dataDir }) {
         }
         if (body.ended) {
           await tx.run('UPDATE walk_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?', [now, sessionId]);
+          // Friends only see you on their map while you walk.
+          await tx.run('DELETE FROM locations WHERE user_id = ?', [userId]);
         }
         return { added, earned };
       });
@@ -375,6 +390,76 @@ export async function createApp({ dbFile, dataDir }) {
         ...publicBuddy(row), userId: row.user_id, username: row.username, isFriend: Boolean(row.is_friend),
       })),
     }),
+
+    'POST /api/location': async ({ userId, body }) => {
+      const lat = Number(body.lat);
+      const lng = Number(body.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        throw new HttpError(400, 'Invalid location');
+      }
+      await db.run(`
+        INSERT INTO locations (user_id, lat, lng, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at
+      `, [userId, lat, lng, Date.now()]);
+      return { ok: true };
+    },
+
+    // Friends who are walking near you and let friends see them. Measured from
+    // the caller's own shared position, so nobody can look up who is standing
+    // somewhere they are not.
+    'GET /api/nearby': async ({ userId, query }) => {
+      const since = Date.now() - NEARBY_FRESH_MS;
+      const me = await db.get('SELECT lat, lng FROM locations WHERE user_id = ? AND updated_at >= ?', [userId, since]);
+      if (!me) return { players: [] };
+      const toPlayer = (row, at) => ({
+        userId: row.user_id, username: row.username, lat: at.lat, lng: at.lng,
+        distanceM: Math.round(distanceM(me, at)), buddy: publicBuddy(row),
+      });
+      const players = (await db.all(`
+        SELECT b.*, u.username, l.lat, l.lng
+        FROM locations l JOIN users u ON u.id = l.user_id JOIN buddies b ON b.user_id = u.id
+        JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+        WHERE u.map_visible = 1 AND l.updated_at >= ?
+      `, [userId, since]))
+        .map((row) => toPlayer(row, row))
+        .filter((player) => player.distanceM <= NEARBY_RADIUS_M);
+      if (query.get('demo') === '1') {
+        const metresPerDegree = 111_320;
+        for (const [i, username] of DEMO_USERNAMES.entries()) {
+          const row = await db.get(`
+            SELECT b.*, u.username FROM users u JOIN buddies b ON b.user_id = u.id
+            JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+            WHERE u.username = ?
+          `, [userId, username]);
+          if (!row || players.some((p) => p.userId === row.user_id)) continue;
+          const [north, east] = DEMO_OFFSETS_M[i % DEMO_OFFSETS_M.length];
+          players.push({
+            ...toPlayer(row, {
+              lat: me.lat + north / metresPerDegree,
+              lng: me.lng + east / (metresPerDegree * Math.cos((me.lat * Math.PI) / 180)),
+            }),
+            demo: true, // the map walks it around this spot
+          });
+        }
+      }
+      players.sort((a, b) => a.distanceM - b.distanceM);
+      return { players: players.slice(0, 30) };
+    },
+
+    'GET /api/player': async ({ userId, query }) => {
+      const id = Number(query.get('id'));
+      const row = Number.isInteger(id) && await db.get(`
+        SELECT b.*, u.username, u.total_steps, f.friend_id IS NOT NULL AS is_friend
+        FROM users u JOIN buddies b ON b.user_id = u.id
+        LEFT JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
+        WHERE u.id = ?
+      `, [userId, id]);
+      if (!row) throw new HttpError(404, 'That buddy has wandered off');
+      return {
+        userId: row.user_id, username: row.username, buddy: publicBuddy(row), record: await record(id),
+        totalSteps: row.total_steps, isFriend: Boolean(row.is_friend),
+      };
+    },
 
     'GET /api/friends': async ({ userId }) => ({ friends: await friendList(userId) }),
 

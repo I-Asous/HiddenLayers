@@ -4,6 +4,7 @@ import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { pointIcon } from './home.js';
+import { chooseWalkVisibility } from './map.js';
 
 const RADIUS = 96;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -93,6 +94,7 @@ export function mount(el) {
         setStatus(steps ? `Nice walk! ${fmt(steps)} steps saved.` : 'Walk ended.', true);
       } else {
         setStatus('');
+        if (await chooseWalkVisibility() === null) return;
         await walk.start();
         // Desktop browsers expose the API but never fire it.
         sensorCheck = setTimeout(() => {
