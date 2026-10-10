@@ -25,7 +25,7 @@ StepBuddy is a mobile-first web app (installable as a PWA) with a small Node ser
 - There are 14 background scenes. Ten cost Stride Points; the rare and legendary ones (Coral Reef, Volcano, Aurora, Throne Room) cost diamonds only.
 
 ### Battles
-- Five rounds. Each buddy attacks once per round, and the higher evasion stat gives a better chance of dodging.
+- Fights go until one beast is knocked out. Each buddy acts once per round, and the higher evasion stat gives a better chance of dodging.
 - The buddy that deals the most total damage wins. A win pays **+5 Stride Points**.
 - Lose a battle you started and that beast has to rest before its next one; your other beasts stay ready. The rest gets longer with every level (+5s each) and at each evolution: egg 30s, baby 1 min, teen 2 min, adult 4 min.
 - Each species throws its own punch, and every miss has its own sound effect.

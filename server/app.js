@@ -9,8 +9,8 @@ import {
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_ROUNDS, BATTLE_WIN_BONUS, COIN_PACKAGES, COSMETICS, EGGS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse, cosmeticCurrency, elementOf,
-  matchup,
+  BATTLE_WIN_BONUS, COIN_PACKAGES, COSMETICS, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse,
+  cosmeticCurrency, elementOf, matchup,
   moodFor, newBattle, opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from './game.js';
 
@@ -182,7 +182,7 @@ export async function createApp({ dbFile, dataDir }) {
   const liveBattles = new Map();
 
   const battleView = ({ id, battle, challenger, opponent }) => ({
-    id, round: battle.round, rounds: BATTLE_ROUNDS, over: battle.over, hpMax: battle.hpMax, hp: battle.hp,
+    id, round: battle.round, rounds: MAX_ROUNDS, over: battle.over, hpMax: battle.hpMax, hp: battle.hp,
     energy: battle.energy, totals: battle.totals, challenger, opponent,
     matchup: matchup(challenger.element, opponent.element),
   });

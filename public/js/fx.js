@@ -131,7 +131,23 @@ export function sfx(name) {
   el.play().catch(() => {});
 }
 
+// Background music: loops quietly under everything. Browsers only allow it to
+// start from a tap, so it begins on the first one, and it pauses while the app
+// is in the background.
+const music = new Audio('/sounds/music.mp3');
+music.loop = true;
+music.volume = 0.15;
+music.preload = 'auto';
+let musicStarted = false;
+
+document.addEventListener('visibilitychange', () => {
+  if (!musicStarted) return;
+  if (document.hidden) music.pause();
+  else music.play().catch(() => {});
+});
+
 addEventListener('pointerdown', () => {
+  music.play().then(() => { musicStarted = true; }, () => {});
   audio.src = SILENCE;
   audio.play().catch(() => {});
   // Same iOS unlock for the effects: play each once, muted, inside the tap.
