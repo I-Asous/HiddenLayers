@@ -140,9 +140,6 @@ export function mount(el) {
 
   function diamondsHtml() {
     return `
-      <section class="coin-hero diamond-hero">
-        <p>Use diamonds for special offers and future upgrades. This demo purchase adds diamonds instantly.</p>
-      </section>
       <div class="coin-grid diamond-grid">${diamondPackages.map((pack) => {
         const amount = pack.diamonds ?? pack.coins ?? 0;
         return `
