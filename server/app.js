@@ -10,8 +10,8 @@ import {
 import { DAY_MS, DEMO_USERNAMES, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import { distanceM } from '../public/js/geo.js';
 import {
-  BATTLE_WIN_BONUS, COIN_PACKAGES, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
-  streakFor, upgradeCosts,
+  BATTLE_WIN_BONUS, COIN_PACKAGES, EGGS, MAX_ROUNDS, SLOTS, SPECIES, UPGRADES, UPSET_MS, canUse, elementOf, matchup,
+  moodFor, newBattle, opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
 } from './game.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -34,6 +34,13 @@ const NEARBY_RADIUS_M = 1000;
 const NEARBY_FRESH_MS = 120_000;
 // Demo: where the seeded buddies stand around you, in metres [north, east].
 const DEMO_OFFSETS_M = [[60, 40], [-90, 70], [30, -120]];
+
+// Everything that makes a beast itself, and so moves with it when the player
+// switches which one they walk with.
+const BUDDY_COLUMNS = [
+  'name', 'species', 'level', 'attack', 'evasion', 'xp', 'stage', 'hat', 'eyewear', 'accessory', 'background',
+  'personality',
+];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -151,6 +158,18 @@ export async function createApp({ dbFile, dataDir }) {
     return { wins: row.wins, losses: row.losses, draws: row.draws };
   }
 
+  // When the buddy can start a battle again after losing one it started, or
+  // null if it is ready now. Being beaten as the opponent costs no rest.
+  async function restingUntil(userId, buddy) {
+    const last = await db.get(`
+      SELECT winner_id, created_at FROM battles WHERE challenger_id = ?
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    `, [userId]);
+    if (!last || last.winner_id === null || last.winner_id === userId) return null;
+    const until = Number(last.created_at) + restAfterLoss(buddy.level);
+    return until > Date.now() ? until : null;
+  }
+
   async function state(userId, tz) {
     const user = await getUser(userId);
     const buddy = await getBuddy(userId);
@@ -163,10 +182,42 @@ export async function createApp({ dbFile, dataDir }) {
       },
       buddy: {
         ...publicBuddy(buddy), xp: buddy.xp, costs: upgradeCosts(buddy),
-        personality: traitsOf(buddy), mood, moodUntil,
+        personality: traitsOf(buddy), mood, moodUntil, restingUntil: await restingUntil(userId, buddy),
       },
+      resting: (await db.all('SELECT * FROM resting_buddies WHERE user_id = ? ORDER BY id', [userId]))
+        .map((b) => ({ id: b.id, ...publicBuddy(b) })),
       todaySteps: (await stepsByDay(db, userId, tz)).get(today) ?? 0,
       record: await record(userId),
+    };
+  }
+
+  // Battles in progress, one per challenger. Kept in memory: a restart simply
+  // drops them unrecorded.
+  const liveBattles = new Map();
+
+  const battleView = ({ id, battle, challenger, opponent }) => ({
+    id, round: battle.round, rounds: MAX_ROUNDS, over: battle.over, hpMax: battle.hpMax, hp: battle.hp,
+    energy: battle.energy, totals: battle.totals, challenger, opponent,
+    matchup: matchup(challenger.element, opponent.element),
+  });
+
+  // Records a finished (or abandoned) battle and pays the winner.
+  async function endBattle(userId, { forfeit = false } = {}) {
+    const { opponentId, battle, log } = liveBattles.get(userId);
+    liveBattles.delete(userId);
+    const winner = forfeit ? 'b' : battle.winner;
+    const winnerId = winner === 'a' ? userId : winner === 'b' ? opponentId : null;
+    await transaction(db, async (tx) => {
+      if (winnerId) await addPoints(tx, winnerId, BATTLE_WIN_BONUS);
+      await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [winnerId === userId ? 10 : 2, userId]);
+      await tx.run(`
+        INSERT INTO battles (challenger_id, opponent_id, winner_id, challenger_damage, opponent_damage, log, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [userId, opponentId, winnerId, battle.totals.a, battle.totals.b, JSON.stringify(log), Date.now()]);
+    });
+    return {
+      outcome: winner === 'a' ? 'win' : winner === 'b' ? 'loss' : 'draw',
+      bonus: winner === 'a' ? BATTLE_WIN_BONUS : 0,
     };
   }
 
@@ -179,6 +230,20 @@ export async function createApp({ dbFile, dataDir }) {
   async function spendPoints(tx, userId, cost) {
     const { changes } = await tx.run('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?', [cost, userId, cost]);
     if (changes !== 1) throw new HttpError(402, 'Not enough Stride Points');
+  }
+
+  // Diamonds are the coins column.
+  async function spendDiamonds(tx, userId, cost) {
+    const { changes } = await tx.run('UPDATE users SET coins = coins - ? WHERE id = ? AND coins >= ?', [cost, userId, cost]);
+    if (changes !== 1) throw new HttpError(402, 'Not enough diamonds');
+  }
+
+  async function storeEggs(userId, q = db) {
+    const owned = new Set([
+      (await getBuddy(userId, q)).species,
+      ...(await q.all('SELECT species FROM resting_buddies WHERE user_id = ?', [userId])).map((b) => b.species),
+    ]);
+    return EGGS.map((egg) => ({ ...egg, owned: owned.has(egg.species) }));
   }
 
   function validUsername(value) {
@@ -198,7 +263,8 @@ export async function createApp({ dbFile, dataDir }) {
     'POST /api/login': async ({ body, tz }) => {
       const username = validUsername(body.username);
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
-      const species = SPECIES.includes(body.species) ? body.species : SPECIES[0];
+      // Nobody picks their beast: every new player is handed a random egg.
+      const species = SPECIES[Math.floor(Math.random() * SPECIES.length)];
       // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
       const preset = presetById(body.personality);
       const token = randomBytes(24).toString('hex');
@@ -353,8 +419,29 @@ export async function createApp({ dbFile, dataDir }) {
       return state(userId, tz);
     },
 
+    // Swaps the buddy the player walks with for one of their resting beasts.
+    'POST /api/buddy/switch': async ({ userId, body, tz }) => {
+      if (!Number.isInteger(body.id)) throw new HttpError(400, 'Unknown beast');
+      await transaction(db, async (tx) => {
+        const next = await tx.get('SELECT * FROM resting_buddies WHERE id = ? AND user_id = ?', [body.id, userId]);
+        if (!next) throw new HttpError(404, 'You don\'t have that beast');
+        const active = await getBuddy(userId, tx);
+        const assignments = BUDDY_COLUMNS.map((column) => `${column} = ?`).join(', ');
+        await tx.run(`UPDATE resting_buddies SET ${assignments} WHERE id = ?`,
+          [...BUDDY_COLUMNS.map((column) => active[column]), next.id]);
+        await tx.run(`UPDATE buddies SET ${assignments} WHERE user_id = ?`,
+          [...BUDDY_COLUMNS.map((column) => next[column]), userId]);
+        // Lines and memories belong to the beast that was just put to rest.
+        await tx.run('DELETE FROM ready_lines WHERE user_id = ?', [userId]);
+        await tx.run('DELETE FROM buddy_memory WHERE user_id = ?', [userId]);
+      });
+      ensurePersonality(userId).then(() => prepareLines(userId, tz)).catch((err) => console.error('[ai]', err.message));
+      return state(userId, tz);
+    },
+
     'GET /api/store': async ({ userId }) => ({
       items: await storeItems(userId),
+      eggs: await storeEggs(userId),
       coinPackages: COIN_PACKAGES,
     }),
 
@@ -369,6 +456,21 @@ export async function createApp({ dbFile, dataDir }) {
           [userId, item.id, Date.now()]);
       });
       return { items: await storeItems(userId), ...await state(userId, tz) };
+    },
+
+    // A bought egg joins the player's resting beasts until they switch to it.
+    'POST /api/store/buy-egg': async ({ userId, body, tz }) => {
+      const egg = EGGS.find(({ species }) => species === body.species);
+      if (!egg) throw new HttpError(404, 'No such egg');
+      await transaction(db, async (tx) => {
+        if ((await storeEggs(userId, tx)).find(({ species }) => species === egg.species).owned) {
+          throw new HttpError(409, 'You already have that beast');
+        }
+        await (egg.currency === 'diamonds' ? spendDiamonds : spendPoints)(tx, userId, egg.price);
+        const name = egg.species[0].toUpperCase() + egg.species.slice(1);
+        await tx.run('INSERT INTO resting_buddies (user_id, name, species) VALUES (?, ?, ?)', [userId, name, egg.species]);
+      });
+      return { eggs: await storeEggs(userId), ...await state(userId, tz) };
     },
 
     'POST /api/store/buy-coins': async ({ userId, body, tz }) => {
@@ -520,33 +622,49 @@ export async function createApp({ dbFile, dataDir }) {
       return { board, scope: friendsOnly ? 'friends' : 'all', entries: top };
     },
 
-    'POST /api/battles': async ({ userId, body, tz }) => {
+    // Starts a battle. The player then sends one move per round; the opponent's
+    // beast picks its own. Nothing is recorded until the battle ends.
+    'POST /api/battles': async ({ userId, body }) => {
       const opponentId = Number(body.opponentId);
       if (opponentId === userId) throw new HttpError(400, 'You can\'t battle yourself');
-      const result = await transaction(db, async (tx) => {
-        const mine = await getBuddy(userId, tx);
-        const theirs = await getBuddy(opponentId, tx);
-        if (!theirs) throw new HttpError(404, 'That buddy has wandered off');
-        const battle = resolveBattle(mine, theirs);
-        const winnerId = battle.winner === 'a' ? userId : battle.winner === 'b' ? opponentId : null;
-        if (winnerId) await addPoints(tx, winnerId, BATTLE_WIN_BONUS);
-        await tx.run('UPDATE buddies SET xp = xp + ? WHERE user_id = ?', [winnerId === userId ? 10 : 2, userId]);
-        const { id } = await tx.run(`
-          INSERT INTO battles (challenger_id, opponent_id, winner_id, challenger_damage, opponent_damage, log, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
-        `, [userId, opponentId, winnerId, battle.totals.a, battle.totals.b, JSON.stringify(battle.log), Date.now()]);
-        return {
-          id,
-          outcome: battle.winner === 'a' ? 'win' : battle.winner === 'b' ? 'loss' : 'draw',
-          bonus: battle.winner === 'a' ? BATTLE_WIN_BONUS : 0,
-          log: battle.log,
-          totals: battle.totals,
-          hpMax: battle.hpMax,
-          challenger: publicBuddy(mine),
-          opponent: { ...publicBuddy(theirs), username: (await getUser(opponentId, tx)).username },
-        };
-      });
-      return { battle: result, ...await state(userId, tz) };
+      // Postgres rejects a non-integer id outright where SQLite just finds nobody.
+      if (!Number.isInteger(opponentId)) throw new HttpError(404, 'That buddy has wandered off');
+      const mine = await getBuddy(userId);
+      const theirs = await getBuddy(opponentId);
+      if (!theirs) throw new HttpError(404, 'That buddy has wandered off');
+      // Walking away from a battle to start another counts as losing it.
+      if (liveBattles.has(userId)) await endBattle(userId, { forfeit: true });
+      const until = await restingUntil(userId, mine);
+      if (until) {
+        const seconds = Math.ceil((until - Date.now()) / 1000);
+        const left = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+        throw new HttpError(429, `${mine.name} is still resting after that loss. Ready in ${left}`);
+      }
+      const live = {
+        id: randomBytes(8).toString('hex'), opponentId, sides: { a: mine, b: theirs }, battle: newBattle(mine, theirs),
+        log: [], challenger: publicBuddy(mine),
+        opponent: { ...publicBuddy(theirs), username: (await getUser(opponentId)).username },
+      };
+      liveBattles.set(userId, live);
+      return { battle: battleView(live) };
+    },
+
+    'POST /api/battles/move': async ({ userId, body, tz }) => {
+      const live = liveBattles.get(userId);
+      if (!live || live.id !== body.battleId) throw new HttpError(409, 'That battle is over');
+      if (!canUse(live.battle, 'a', body.move)) throw new HttpError(400, 'You can\'t use that move right now');
+      const round = live.battle.round;
+      const moves = { a: body.move, b: opponentMove(live.battle) };
+      const actions = resolveRound(live.battle, live.sides, moves);
+      live.log.push({ round, ...actions });
+      if (!live.battle.over) return { round: { number: round, ...actions }, battle: battleView(live) };
+      const result = await endBattle(userId);
+      return { round: { number: round, ...actions }, battle: { ...battleView(live), ...result }, ...await state(userId, tz) };
+    },
+
+    'POST /api/battles/forfeit': async ({ userId, body, tz }) => {
+      if (liveBattles.get(userId)?.id === body.battleId) await endBattle(userId, { forfeit: true });
+      return state(userId, tz);
     },
 
     'GET /api/battles': async ({ userId }) => ({
@@ -681,7 +799,8 @@ export async function createApp({ dbFile, dataDir }) {
 
 function publicBuddy(b) {
   return {
-    name: b.name, species: b.species, level: b.level, attack: b.attack, evasion: b.evasion, stage: b.stage,
+    name: b.name, species: b.species, element: elementOf(b.species), level: b.level, attack: b.attack,
+    evasion: b.evasion, stage: b.stage,
     equipped: { hat: b.hat, eyewear: b.eyewear, accessory: b.accessory, background: b.background },
   };
 }

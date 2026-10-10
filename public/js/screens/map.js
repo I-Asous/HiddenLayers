@@ -10,7 +10,7 @@
 // Nearby players appear as their own buddies; tap one to see them and battle.
 import { api } from '../api.js';
 import { SPECIES, buddySvg, stageName } from '../buddy.js';
-import { escapeHtml, fmt, toast } from '../fx.js';
+import { escapeHtml, fmt, fmtDistance, toast } from '../fx.js';
 import { bearingDeg, distanceM, pathLengthM, pointAlong } from '../geo.js';
 import { gps } from '../gps.js';
 import { icons } from '../icons.js';
@@ -215,7 +215,7 @@ export function mount(el) {
   function updateCard() {
     const steps = walk.sessionSteps;
     const meters = Math.max(walk.gpsMeters, steps * 0.762);
-    $('map-distance').textContent = meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`;
+    $('map-distance').textContent = fmtDistance(meters);
     $('map-steps').textContent = fmt(steps);
     $('map-points').innerHTML = `${pointIcon}${fmt(Math.floor(steps / 100))}`;
     $('map-walk').textContent = walk.walking ? 'End Walk' : 'Start Walk';

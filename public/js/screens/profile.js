@@ -1,5 +1,5 @@
 import { api, setToken } from '../api.js';
-import { escapeHtml, fmt, toast } from '../fx.js';
+import { distanceUnits, escapeHtml, fmt, setDistanceUnits, toast } from '../fx.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 
@@ -27,6 +27,13 @@ export async function openProfile() {
         <div class="stat is-loss"><small>Losses</small><b>${record.losses}</b></div>
         <div class="stat"><small>Draws</small><b>${record.draws}</b></div>
       </div>
+      <div class="setting">
+        <span class="setting-label">Distance units</span>
+        <div class="segmented" role="radiogroup" aria-label="Distance units">${[['km', 'Kilometres'], ['mi', 'Miles']].map(([value, label]) => `
+          <button type="button" role="radio" aria-checked="${distanceUnits() === value}" aria-selected="${distanceUnits() === value}"
+            data-units="${value}">${label}</button>`).join('')}
+        </div>
+      </div>
       <form id="profile-form">
         <label>Buddy name
           <input name="buddyName" maxlength="16" required value="${escapeHtml(buddy.name)}" autocomplete="off">
@@ -53,6 +60,17 @@ export async function openProfile() {
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay || event.target.closest('[data-close]')) close();
   });
+
+  // Applies straight away, no Save needed: it only changes how distances are shown.
+  overlay.querySelectorAll('[data-units]').forEach((button) => button.addEventListener('click', () => {
+    setDistanceUnits(button.dataset.units);
+    overlay.querySelectorAll('[data-units]').forEach((b) => {
+      const on = b === button;
+      b.setAttribute('aria-checked', on);
+      b.setAttribute('aria-selected', on);
+    });
+    app.dispatchEvent(new Event('change'));
+  }));
 
   api('/personalities').then(({ personalities }) => {
     overlay.querySelector('[name=personality]')

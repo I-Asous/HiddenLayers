@@ -5,16 +5,12 @@
 // automatically around each layer. Cosmetics are placed from anchors read off
 // the sprite (eyes, top of head, neck), so any item fits any beast at any stage.
 
+import { BESTIARY } from './bestiary.js';
+import { C } from './palette.js';
+
 const SIZE = 32;
 const GROUND = 30; // sprites stand with their last row at y = GROUND - 1
 const O = '#1a1c2c';
-
-// Sweetie 16, the palette the whole app is drawn in.
-const C = {
-  night: '#1a1c2c', plum: '#5d275d', red: '#b13e53', orange: '#ef7d57', yellow: '#ffcd75',
-  lime: '#a7f070', green: '#38b764', teal: '#257179', navy: '#29366f', blue: '#3b5dc9',
-  sky: '#41a6f6', cyan: '#73eff7', white: '#f4f4f4', silver: '#94b0c2', slate: '#566c86', dusk: '#333c57',
-};
 
 // Sprite letters: b body, d dark body, l belly, h belly shade, a/c accents,
 // p cheek, k eye, w eye white / teeth, m mouth, s egg shell.
@@ -256,6 +252,7 @@ export const SPECIES = {
       },
     },
   },
+  ...BESTIARY,
 };
 
 export const SPECIES_IDS = Object.keys(SPECIES);

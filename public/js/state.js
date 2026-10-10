@@ -2,7 +2,7 @@ import { api } from './api.js';
 import { walk } from './steps.js';
 
 class App extends EventTarget {
-  /** Latest server state: { user, buddy, todaySteps, record }. Null when signed out. */
+  /** Latest server state: { user, buddy, resting, todaySteps, record }. Null when signed out. */
   state = null;
   demo = new URLSearchParams(location.search).get('demo') === '1';
   /** Something the buddy said out loud; shown in the Home speech bubble for a while. */
@@ -12,7 +12,8 @@ class App extends EventTarget {
   setState(data) {
     if (!data?.user) return;
     this.state = {
-      user: data.user, buddy: data.buddy, todaySteps: data.todaySteps, record: data.record,
+      user: data.user, buddy: data.buddy, resting: data.resting ?? [], todaySteps: data.todaySteps,
+      record: data.record,
     };
     this.dispatchEvent(new Event('change'));
   }

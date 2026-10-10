@@ -5,6 +5,7 @@ import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { pointIcon } from './home.js';
 import { chooseWalkVisibility } from './map.js';
+import { diamondIcon } from './store.js';
 
 const RADIUS = 96;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -15,7 +16,10 @@ export function mount(el) {
   el.innerHTML = `
     <header class="topbar">
       <h1>Walk Mode</h1>
-      <div class="balance" id="walk-balance">${pointIcon}<b id="walk-points"></b></div>
+      <div class="topbar-balances">
+        <div class="balance" id="walk-balance">${pointIcon}<b id="walk-points"></b></div>
+        <div class="balance balance-diamonds" id="walk-diamonds">${diamondIcon}<b id="walk-diamonds-val"></b></div>
+      </div>
     </header>
 
     <section class="ring-card">
@@ -55,6 +59,8 @@ export function mount(el) {
     const pct = Math.min(1, today / user.dailyGoal);
     $('walk-points').textContent = fmt(user.points);
     $('walk-balance').setAttribute('aria-label', `${user.points} Stride Points`);
+    $('walk-diamonds-val').textContent = fmt(app.diamonds);
+    $('walk-diamonds').setAttribute('aria-label', `${app.diamonds} Diamonds`);
     $('today-steps').textContent = fmt(today);
     $('goal-text').textContent = today >= user.dailyGoal
       ? 'Goal reached!'

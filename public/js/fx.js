@@ -6,7 +6,38 @@ export const escapeHtml = (value) =>
 
 export const fmt = (n) => Math.round(n).toLocaleString('en-US');
 
-export const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Distance units ('km' or 'mi') are a display preference kept on this device.
+const UNITS_KEY = 'stepbuddy.units';
+const M_PER_MI = 1609.344;
+const FT_PER_M = 3.28084;
+
+export function distanceUnits() {
+  try {
+    return localStorage.getItem(UNITS_KEY) === 'mi' ? 'mi' : 'km';
+  } catch {
+    return 'km';
+  }
+}
+
+export function setDistanceUnits(units) {
+  try {
+    localStorage.setItem(UNITS_KEY, units);
+  } catch {}
+}
+
+/**
+ * Metres in the player's units. Short distances drop to m / ft unless
+ * `small` is false (then it's always km / mi).
+ */
+export function fmtDistance(meters, { decimals = 2, small = true } = {}) {
+  if (distanceUnits() === 'mi') {
+    const miles = meters / M_PER_MI;
+    return small && miles < 0.1 ? `${fmt(meters * FT_PER_M)} ft` : `${miles.toFixed(decimals)} mi`;
+  }
+  return small && meters < 1000 ? `${fmt(meters)} m` : `${(meters / 1000).toFixed(decimals)} km`;
+}
+
+export const reducedMotion =() => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -100,7 +131,23 @@ export function sfx(name) {
   el.play().catch(() => {});
 }
 
+// Background music: loops quietly under everything. Browsers only allow it to
+// start from a tap, so it begins on the first one, and it pauses while the app
+// is in the background.
+const music = new Audio('/sounds/music.mp3');
+music.loop = true;
+music.volume = 0.15;
+music.preload = 'auto';
+let musicStarted = false;
+
+document.addEventListener('visibilitychange', () => {
+  if (!musicStarted) return;
+  if (document.hidden) music.pause();
+  else music.play().catch(() => {});
+});
+
 addEventListener('pointerdown', () => {
+  music.play().then(() => { musicStarted = true; }, () => {});
   audio.src = SILENCE;
   audio.play().catch(() => {});
   // Same iOS unlock for the effects: play each once, muted, inside the tap.
