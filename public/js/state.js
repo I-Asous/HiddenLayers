@@ -31,6 +31,20 @@ class App extends EventTarget {
     return (this.state?.todaySteps ?? 0) + walk.unsynced;
   }
 
+  /** Current diamond balance */
+  get diamonds() {
+    return this.state?.user?.diamonds ?? this.state?.user?.coins ?? 0;
+  }
+
+  /** Add diamonds locally and notify all listeners */
+  addDiamonds(amount) {
+    if (!this.state?.user) return;
+    const current = this.state.user.diamonds ?? this.state.user.coins ?? 0;
+    this.state.user.diamonds = current + Number(amount);
+    this.state.user.coins = this.state.user.diamonds;
+    this.dispatchEvent(new Event('change'));
+  }
+
   say(text) {
     if (!text) return;
     // Cleared when the voice finishes (see home); the time limit is a backstop
