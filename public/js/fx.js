@@ -136,18 +136,45 @@ export function sfx(name) {
 // is in the background.
 const music = new Audio('/sounds/music.mp3');
 music.loop = true;
-music.volume = 0.15;
 music.preload = 'auto';
 let musicStarted = false;
 
+// Whether the music plays and how loud are preferences kept on this device.
+// level runs 0..1 on the settings slider; even at full it stays under the
+// buddy's voice and the sound effects.
+const MUSIC_KEY = 'stepbuddy.music';
+const MUSIC_MAX_VOLUME = 0.4;
+const musicPrefs = { on: true, level: 0.4 };
+try {
+  const saved = JSON.parse(localStorage.getItem(MUSIC_KEY) ?? '{}');
+  if (typeof saved.on === 'boolean') musicPrefs.on = saved.on;
+  if (saved.level >= 0 && saved.level <= 1) musicPrefs.level = saved.level;
+} catch {}
+music.volume = musicPrefs.level * MUSIC_MAX_VOLUME;
+
+export const musicSettings = () => ({ ...musicPrefs });
+
+/** Turns the music on or off and sets its level (0..1); either can be left out. */
+export function setMusic({ on = musicPrefs.on, level = musicPrefs.level } = {}) {
+  musicPrefs.on = on;
+  musicPrefs.level = Math.min(1, Math.max(0, level));
+  music.volume = musicPrefs.level * MUSIC_MAX_VOLUME;
+  try {
+    localStorage.setItem(MUSIC_KEY, JSON.stringify(musicPrefs));
+  } catch {}
+  // Changing the setting is itself a tap, so the music may start right here.
+  if (on) music.play().then(() => { musicStarted = true; }, () => {});
+  else music.pause();
+}
+
 document.addEventListener('visibilitychange', () => {
   if (!musicStarted) return;
-  if (document.hidden) music.pause();
+  if (document.hidden || !musicPrefs.on) music.pause();
   else music.play().catch(() => {});
 });
 
 addEventListener('pointerdown', () => {
-  music.play().then(() => { musicStarted = true; }, () => {});
+  if (musicPrefs.on) music.play().then(() => { musicStarted = true; }, () => {});
   audio.src = SILENCE;
   audio.play().catch(() => {});
   // Same iOS unlock for the effects: play each once, muted, inside the tap.

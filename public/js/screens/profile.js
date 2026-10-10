@@ -1,6 +1,8 @@
 import { api, setToken } from '../api.js';
 import { mountStepHistory, parse, shortDate } from '../charts.js';
-import { distanceUnits, escapeHtml, fmt, fmtDistance, setDistanceUnits, toast } from '../fx.js';
+import {
+  distanceUnits, escapeHtml, fmt, fmtDistance, musicSettings, setDistanceUnits, setMusic, toast,
+} from '../fx.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 
@@ -73,6 +75,17 @@ export async function openProfile() {
             data-units="${value}">${label}</button>`).join('')}
         </div>
       </div>
+      <div class="setting">
+        <span class="setting-label">Music</span>
+        <div class="segmented" role="radiogroup" aria-label="Music">${[[true, 'On'], [false, 'Off']].map(([value, label]) => `
+          <button type="button" role="radio" aria-checked="${musicSettings().on === value}"
+            aria-selected="${musicSettings().on === value}" data-music="${value}">${label}</button>`).join('')}
+        </div>
+        <label class="volume">Volume
+          <input type="range" id="music-volume" min="0" max="100" step="5" value="${Math.round(musicSettings().level * 100)}"
+            ${musicSettings().on ? '' : 'disabled'}>
+        </label>
+      </div>
       <form id="profile-form">
         <label>Daily step goal
           <input name="dailyGoal" type="number" inputmode="numeric" min="500" max="50000" step="100" required
@@ -102,6 +115,20 @@ export async function openProfile() {
     });
     app.dispatchEvent(new Event('change'));
   }));
+
+  // Music changes are heard straight away and remembered on this device.
+  overlay.querySelectorAll('[data-music]').forEach((button) => button.addEventListener('click', () => {
+    const on = button.dataset.music === 'true';
+    setMusic({ on });
+    overlay.querySelectorAll('[data-music]').forEach((b) => {
+      b.setAttribute('aria-checked', b === button);
+      b.setAttribute('aria-selected', b === button);
+    });
+    overlay.querySelector('#music-volume').disabled = !on;
+  }));
+  overlay.querySelector('#music-volume').addEventListener('input', (event) => {
+    setMusic({ level: Number(event.target.value) / 100 });
+  });
 
   overlay.querySelector('#profile-form').addEventListener('submit', async (event) => {
     event.preventDefault();
