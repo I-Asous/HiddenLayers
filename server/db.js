@@ -33,6 +33,7 @@ function openSqlite(file) {
       coins       INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0),
       total_steps INTEGER NOT NULL DEFAULT 0,
       daily_goal  INTEGER NOT NULL DEFAULT ${DEFAULT_DAILY_GOAL},
+      map_visible INTEGER NOT NULL DEFAULT 1, -- friends see you on their map while you walk
       created_at  INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -147,6 +148,13 @@ function openSqlite(file) {
       mood    TEXT, -- the mood it was written in; stale once the mood changes
       PRIMARY KEY (user_id, event)
     );
+    -- Each player's last position, reported while their GPS is tracking.
+    CREATE TABLE IF NOT EXISTS locations (
+      user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+      lat        REAL NOT NULL,
+      lng        REAL NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
   // Databases created before beasts existed have no species column.
   if (!db.prepare('PRAGMA table_info(buddies)').all().some((col) => col.name === 'species')) {
@@ -157,6 +165,9 @@ function openSqlite(file) {
   }
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'coins')) {
     db.exec('ALTER TABLE users ADD COLUMN coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0)');
+  }
+  if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'map_visible')) {
+    db.exec('ALTER TABLE users ADD COLUMN map_visible INTEGER NOT NULL DEFAULT 1');
   }
   // The player's profile picture: a small image as a data: URL, or NULL for none.
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'avatar')) {
@@ -226,6 +237,7 @@ const PG_SCHEMA = `
     coins       INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0),
     total_steps INTEGER NOT NULL DEFAULT 0,
     daily_goal  INTEGER NOT NULL DEFAULT ${DEFAULT_DAILY_GOAL},
+    map_visible INTEGER NOT NULL DEFAULT 1,
     created_at  BIGINT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -335,6 +347,12 @@ const PG_SCHEMA = `
     mood    TEXT,
     PRIMARY KEY (user_id, event)
   );
+  CREATE TABLE IF NOT EXISTS locations (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+    lat        DOUBLE PRECISION NOT NULL,
+    lng        DOUBLE PRECISION NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS species TEXT NOT NULL DEFAULT 'dragon';
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS personality TEXT;
   ALTER TABLE ready_lines ADD COLUMN IF NOT EXISTS mood TEXT;
@@ -342,6 +360,7 @@ const PG_SCHEMA = `
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE resting_buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0);
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS map_visible INTEGER NOT NULL DEFAULT 1;
 `;
 
 // Any number for pg_advisory_xact_lock; all StepBuddy transactions share it.
@@ -456,6 +475,7 @@ const DEMO_USERS = [
     equipped: { hat: 'crown', eyewear: 'monocle', accessory: 'cape', background: 'bg-space' }, avgSteps: 9500,
   },
 ];
+export const DEMO_USERNAMES = DEMO_USERS.map((demo) => demo.username);
 
 async function seedDemoUsers(db) {
   if ((await db.get('SELECT COUNT(*) AS n FROM users')).n > 0) return;

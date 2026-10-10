@@ -1,7 +1,28 @@
 // Live position tracking for the Map tab. Feeds counted distance into the
 // current walk and tells the map where the buddy should be heading.
-import { GpsFilter, bearingDeg } from './geo.js';
+import { api } from './api.js';
+import { GpsFilter, bearingDeg, distanceM } from './geo.js';
 import { walk } from './steps.js';
+
+// How often the position is shared, so friends see each other on the map.
+const SHARE_EVERY_MS = 15_000;
+const SHARE_AFTER_M = 25;
+// Set once the player has said whether friends may see them; nothing is shared before.
+const CHOSEN_KEY = 'stepbuddy.mapVisibilityAsked';
+
+export function visibilityChosen() {
+  try {
+    return localStorage.getItem(CHOSEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function markVisibilityChosen() {
+  try {
+    localStorage.setItem(CHOSEN_KEY, '1');
+  } catch {}
+}
 
 class Gps extends EventTarget {
   /** Where the buddy should be: { lng, lat }, or null before the first fix. */
@@ -18,6 +39,7 @@ class Gps extends EventTarget {
   #filter = new GpsFilter();
 
   #mapOpen = false;
+  #shared = null; // { point, at } of the last position sent to the server
 
   constructor() {
     super();
@@ -79,7 +101,20 @@ class Gps extends EventTarget {
       walk.addGpsMeters(meters);
     }
     this.position = point;
+    this.share(point);
     this.dispatchEvent(Object.assign(new Event('fix'), { teleport }));
+  }
+
+  /**
+   * While the map is open or a walk is on, tells the server where the player
+   * is, at most every 15s unless they moved 25m.
+   */
+  share(point) {
+    if (!(this.#mapOpen || walk.walking) || !visibilityChosen()) return;
+    const now = Date.now();
+    if (this.#shared && now - this.#shared.at < SHARE_EVERY_MS && distanceM(this.#shared.point, point) < SHARE_AFTER_M) return;
+    this.#shared = { point, at: now };
+    return api('/location', { method: 'POST', body: point }).catch(() => {});
   }
 
   #setStatus(status) {

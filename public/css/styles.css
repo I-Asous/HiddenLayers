@@ -602,8 +602,8 @@ input::placeholder { color: var(--slate); }
 .map-empty[hidden] { display: none; }
 .map > div { width: 100%; height: 100%; }
 
-/* The character's own canvas in the retro look, centred on the map centre. */
-.map-buddy { position: absolute; top: 50%; left: 50%; z-index: 1; width: 260px; height: 260px; transform: translate(-50%, -50%); image-rendering: pixelated; pointer-events: none; }
+/* The characters' own canvas in the retro look, laid over the whole map. */
+.map-buddy { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
 .map-buddy[hidden] { display: none; }
 
 .map-card {
@@ -705,6 +705,102 @@ input::placeholder { color: var(--slate); }
 }
 
 .map-controls .btn { flex: 1; padding-inline: 8px; }
+.map-controls[hidden] { display: none; }
+
+/* Zoom buttons, top right, clear of the stats card. */
+.map-zoom {
+  position: absolute;
+  top: calc(12px + var(--safe-top));
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: var(--border);
+}
+.map-zoom button {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: none;
+  font-family: var(--pixel);
+  font-size: 16px;
+  color: var(--ink);
+}
+.map-zoom button + button { border-top: 3px solid var(--ink); }
+
+/* Shown once the map has been dragged away from the buddy. */
+.map-recenter {
+  position: absolute;
+  top: calc(122px + var(--safe-top));
+  right: 12px;
+  z-index: 2;
+  width: 50px;
+  height: 50px;
+  background: var(--yellow);
+  border: var(--border);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--dark);
+}
+.map-recenter .px-icon { width: 24px; height: 24px; }
+.map-recenter[hidden] { display: none; }
+
+/* Name tags sit in their own layer over the characters, so none is ever covered. */
+.map-tags { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+
+/* A nearby player's tap area: feet on their map position, up past their head,
+   name tag on top (the height is set from how tall they are drawn). */
+.map-player {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 56px;
+  height: 72px;
+  pointer-events: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  transform: translate(-50%, -100%);
+  cursor: pointer;
+}
+.map-player span {
+  /* Just above the head, however small the character is drawn. */
+  position: absolute;
+  bottom: calc(var(--head, 48px) + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 4px 2px;
+  background: var(--dark);
+  border: 2px solid var(--ink);
+  color: var(--yellow);
+  font-family: var(--pixel);
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+/* The player being looked at: their profile, over the walk controls. */
+.map-profile {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 40px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--panel);
+  border: var(--border);
+}
+.map-profile[hidden] { display: none; }
+.map-profile-head { display: flex; align-items: center; gap: var(--s3); }
+.map-profile-head .opponent-art { width: 64px; }
+.map-profile-stats { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.map-profile-actions { display: flex; align-items: center; gap: 10px; }
+.map-profile-actions .btn { flex: 1; padding-inline: 8px; }
 
 /* ---------- Store ---------- */
 

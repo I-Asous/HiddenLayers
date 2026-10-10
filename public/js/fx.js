@@ -178,7 +178,7 @@ document.addEventListener('visibilitychange', () => {
   else music.play().catch(() => {});
 });
 
-addEventListener('pointerdown', () => {
+addEventListener('pointerup', () => {
   if (musicPrefs.on) music.play().then(() => { musicStarted = true; }, () => {});
   audio.src = SILENCE;
   audio.play().catch(() => {});

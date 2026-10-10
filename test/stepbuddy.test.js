@@ -1001,6 +1001,80 @@ test('the map key comes from the server environment', async () => {
   assert.equal((await call('GET', '/config', null, null)).status, 401);
 });
 
+test('nearby: friends anywhere who let friends see them, nearest first', async () => {
+  const park = { lat: 40.73082, lng: -73.99733 };
+  const signUp = async (username) => (await call('POST', '/login', { username, buddyName: 'Pal' }, null)).data;
+  const near = await signUp('near_walker');
+  const far = await signUp('far_walker');
+  const stale = await signUp('stale_walker');
+  const stranger = await signUp('stranger');
+  // A friend request only counts once they accept it.
+  const me = (await call('GET', '/me')).data.user;
+  const befriend = async (other) => {
+    await call('POST', '/friends', { username: other.user.username });
+    await call('POST', '/friends/respond', { userId: me.id, accept: true }, other.token);
+  };
+  for (const other of [near, far, stale]) await befriend(other);
+
+  assert.equal((await call('POST', '/location', { lat: 91, lng: 0 })).status, 400);
+  assert.equal((await call('POST', '/location', { lat: 'x', lng: 0 })).status, 400);
+  // Nothing shared yet: you see nobody.
+  assert.deepEqual((await call('GET', '/nearby')).data.players, []);
+
+  await call('POST', '/location', park);
+  await call('POST', '/location', { lat: park.lat + 0.0027, lng: park.lng }, near.token); // ~300m north
+  await call('POST', '/location', { lat: park.lat + 0.045, lng: park.lng }, far.token); // ~5km north
+  await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.001 }, stale.token);
+  await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.0005 }, stranger.token);
+  new DatabaseSync(dbFile).prepare('UPDATE locations SET updated_at = ? WHERE user_id = ?')
+    .run(Date.now() - 3 * 60_000, stale.user.id);
+
+  const usernames = async (route = '/nearby') => (await call('GET', route)).data.players.map((p) => p.username).sort();
+  const { players } = (await call('GET', '/nearby')).data;
+  // Not the stranger, however close; the far friend too, after the near one.
+  assert.deepEqual(players.map((p) => p.username), ['near_walker', 'far_walker']);
+  assert.ok(Math.abs(players[0].distanceM - 300) < 10);
+  assert.ok(Math.abs(players[1].distanceM - 5000) < 50);
+  assert.equal(players[0].buddy.name, 'Pal');
+
+  // Becoming friends puts the stranger on the map.
+  await befriend(stranger);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker', 'stranger']);
+
+  // Hidden players vanish at once and stay off friends' maps.
+  assert.equal((await call('PATCH', '/me', { mapVisible: 'x' }, stranger.token)).status, 400);
+  const hidden = await call('PATCH', '/me', { mapVisible: false }, stranger.token);
+  assert.equal(hidden.data.user.mapVisible, false);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+  await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.0005 }, stranger.token);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+
+  // Demo mode adds only the seeded buddies you are friends with.
+  await call('POST', '/friends', { username: 'ana' }); // 409 if already friends; either way, friends
+  const demoFriends = (await call('GET', '/friends')).data.friends
+    .map((f) => f.username).filter((name) => ['mira', 'theo', 'ana'].includes(name));
+  assert.ok(demoFriends.includes('ana') && demoFriends.length < 3, `demo friends: ${demoFriends}`);
+  const demo = (await call('GET', '/nearby?demo=1')).data.players;
+  assert.deepEqual(demo.map((p) => p.username).sort(), [...demoFriends, 'far_walker', 'near_walker'].sort());
+  for (const p of demo) assert.equal(Boolean(p.demo), !p.username.endsWith('_walker')); // only seeded buddies pace
+
+  // Friends who stop walking stay on the map while their position is fresh.
+  await call('POST', '/steps/sync', { sessionId: 'near-walk-0001', total: 0, ended: true }, near.token);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+});
+
+test('a player profile shows their buddy and record', async () => {
+  const mira = (await call('GET', '/opponents')).data.opponents.find((o) => o.username === 'mira');
+  const { status, data } = await call('GET', `/player?id=${mira.userId}`);
+  assert.equal(status, 200);
+  assert.equal(data.username, 'mira');
+  assert.equal(data.buddy.species, 'phoenix');
+  assert.deepEqual(Object.keys(data.record).sort(), ['draws', 'losses', 'wins']);
+  assert.equal(typeof data.isFriend, 'boolean');
+  assert.equal((await call('GET', '/player?id=99999')).status, 404);
+  assert.equal((await call('GET', '/player?id=abc')).status, 404);
+});
+
 test('requests without a session are rejected', async () => {
   assert.equal((await call('GET', '/me', null, null)).status, 401);
 });

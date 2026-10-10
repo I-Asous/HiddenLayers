@@ -3,6 +3,7 @@ import { mountStepHistory, parse, shortDate } from '../charts.js';
 import {
   avatarHtml, distanceUnits, escapeHtml, fmt, fmtDistance, musicSettings, setDistanceUnits, setMusic, toast,
 } from '../fx.js';
+import { markVisibilityChosen } from '../gps.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 
@@ -108,6 +109,13 @@ export async function openProfile() {
         </div>
       </div>
       <div class="setting">
+        <span class="setting-label">On friends' maps</span>
+        <div class="segmented" role="radiogroup" aria-label="On friends' maps">${[['true', 'Visible'], ['false', 'Hidden']].map(([value, label]) => `
+          <button type="button" role="radio" aria-checked="${String(user.mapVisible) === value}"
+            aria-selected="${String(user.mapVisible) === value}" data-map-visible="${value}">${label}</button>`).join('')}
+        </div>
+      </div>
+      <div class="setting">
         <span class="setting-label">Music</span>
         <div class="segmented" role="radiogroup" aria-label="Music">${[[true, 'On'], [false, 'Off']].map(([value, label]) => `
           <button type="button" role="radio" aria-checked="${musicSettings().on === value}"
@@ -173,6 +181,21 @@ export async function openProfile() {
       b.setAttribute('aria-selected', on);
     });
     app.dispatchEvent(new Event('change'));
+  }));
+
+  // Saved straight away too; the Map tab asks this the first time it opens.
+  overlay.querySelectorAll('[data-map-visible]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      app.setState(await api('/me', { method: 'PATCH', body: { mapVisible: button.dataset.mapVisible === 'true' } }));
+      markVisibilityChosen();
+      overlay.querySelectorAll('[data-map-visible]').forEach((b) => {
+        const on = b === button;
+        b.setAttribute('aria-checked', on);
+        b.setAttribute('aria-selected', on);
+      });
+    } catch (err) {
+      toast(err.message, 'warn');
+    }
   }));
 
   // Music changes are heard straight away and remembered on this device.
