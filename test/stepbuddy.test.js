@@ -934,7 +934,7 @@ test('the map key comes from the server environment', async () => {
   assert.equal((await call('GET', '/config', null, null)).status, 401);
 });
 
-test('nearby: walking friends within 1km who let friends see them', async () => {
+test('nearby: friends anywhere who let friends see them, nearest first', async () => {
   const park = { lat: 40.73082, lng: -73.99733 };
   const signUp = async (username) => (await call('POST', '/login', { username, buddyName: 'Pal' }, null)).data;
   const near = await signUp('near_walker');
@@ -958,21 +958,23 @@ test('nearby: walking friends within 1km who let friends see them', async () => 
 
   const usernames = async (route = '/nearby') => (await call('GET', route)).data.players.map((p) => p.username).sort();
   const { players } = (await call('GET', '/nearby')).data;
-  assert.deepEqual(players.map((p) => p.username), ['near_walker']); // not the stranger, however close
+  // Not the stranger, however close; the far friend too, after the near one.
+  assert.deepEqual(players.map((p) => p.username), ['near_walker', 'far_walker']);
   assert.ok(Math.abs(players[0].distanceM - 300) < 10);
+  assert.ok(Math.abs(players[1].distanceM - 5000) < 50);
   assert.equal(players[0].buddy.name, 'Pal');
 
   // Becoming friends puts the stranger on the map.
   await call('POST', '/friends', { username: 'stranger' });
-  assert.deepEqual(await usernames(), ['near_walker', 'stranger']);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker', 'stranger']);
 
   // Hidden players vanish at once and stay off friends' maps.
   assert.equal((await call('PATCH', '/me', { mapVisible: 'x' }, stranger.token)).status, 400);
   const hidden = await call('PATCH', '/me', { mapVisible: false }, stranger.token);
   assert.equal(hidden.data.user.mapVisible, false);
-  assert.deepEqual(await usernames(), ['near_walker']);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
   await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.0005 }, stranger.token);
-  assert.deepEqual(await usernames(), ['near_walker']);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
 
   // Demo mode adds only the seeded buddies you are friends with.
   await call('POST', '/friends', { username: 'ana' }); // 409 if already friends; either way, friends
@@ -980,13 +982,12 @@ test('nearby: walking friends within 1km who let friends see them', async () => 
     .map((f) => f.username).filter((name) => ['mira', 'theo', 'ana'].includes(name));
   assert.ok(demoFriends.includes('ana') && demoFriends.length < 3, `demo friends: ${demoFriends}`);
   const demo = (await call('GET', '/nearby?demo=1')).data.players;
-  assert.deepEqual(demo.map((p) => p.username).sort(), [...demoFriends, 'near_walker'].sort());
-  assert.ok(demo.every((p) => p.distanceM <= 1000));
-  for (const p of demo) assert.equal(Boolean(p.demo), p.username !== 'near_walker'); // only seeded buddies pace
+  assert.deepEqual(demo.map((p) => p.username).sort(), [...demoFriends, 'far_walker', 'near_walker'].sort());
+  for (const p of demo) assert.equal(Boolean(p.demo), !p.username.endsWith('_walker')); // only seeded buddies pace
 
-  // Ending a walk takes you off friends' maps.
+  // Friends who stop walking stay on the map while their position is fresh.
   await call('POST', '/steps/sync', { sessionId: 'near-walk-0001', total: 0, ended: true }, near.token);
-  assert.deepEqual(await usernames(), []);
+  assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
 });
 
 test('a player profile shows their buddy and record', async () => {

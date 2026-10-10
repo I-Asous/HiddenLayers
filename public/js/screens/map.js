@@ -12,7 +12,7 @@ import { api } from '../api.js';
 import { SPECIES, buddySvg, stageName } from '../buddy.js';
 import { escapeHtml, fmt, fmtDistance, toast } from '../fx.js';
 import { bearingDeg, distanceM, pathLengthM, pointAlong } from '../geo.js';
-import { gps } from '../gps.js';
+import { gps, markVisibilityChosen, visibilityChosen } from '../gps.js';
 import { icons } from '../icons.js';
 import { prepareCharacter } from '../rig.js';
 import { app } from '../state.js';
@@ -133,37 +133,37 @@ const STATUS_TEXT = {
 };
 
 /**
- * Asks who can see you on the map before a walk starts, and saves the answer.
- * Resolves true (friends can see you) or false (hidden), or null if closed.
- * It resolves straight from the tap, so the walk that follows still counts as
- * started by the user (iOS only grants motion access from a tap).
+ * Asks, the first time the map opens, whether friends may see you on theirs,
+ * and saves the answer. Nothing is shared until it is answered; later it can
+ * be changed in Settings.
  */
-export function chooseWalkVisibility() {
+function chooseMapVisibility() {
   return new Promise((resolve) => {
-    const visible = app.state.user.mapVisible;
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
       <div class="sheet" role="dialog" aria-modal="true" aria-label="Who can see you">
-        <div class="sheet-head">
-          <h2>Who can see you?</h2>
-          <button class="icon-btn" data-close aria-label="Close">X</button>
-        </div>
-        <p>While you walk, friends nearby can see you on their map.</p>
-        <button class="btn btn-block ${visible ? 'btn-primary' : ''}" data-visible="true">Friends can see me</button>
-        <button class="btn btn-block ${visible ? '' : 'btn-primary'}" data-visible="false">Hide me</button>
+        <div class="sheet-head"><h2>Who can see you?</h2></div>
+        <p>Friends can see you on their map while you have the map open or are walking.
+          You can change this later in Settings.</p>
+        <button class="btn btn-block btn-primary" data-visible="true">Friends can see me</button>
+        <button class="btn btn-block" data-visible="false">Hide me</button>
       </div>`;
     document.body.append(overlay);
-    overlay.addEventListener('click', (event) => {
+    overlay.addEventListener('click', async (event) => {
       const choice = event.target.closest('[data-visible]')?.dataset.visible;
-      if (!choice && event.target !== overlay && !event.target.closest('[data-close]')) return;
-      overlay.remove();
-      if (!choice) return resolve(null);
-      const mapVisible = choice === 'true';
-      resolve(mapVisible);
-      api('/me', { method: 'PATCH', body: { mapVisible } })
-        .then((state) => app.setState(state))
-        .catch((err) => toast(err.message, 'warn'));
+      if (!choice) return;
+      const buttons = overlay.querySelectorAll('[data-visible]');
+      buttons.forEach((button) => { button.disabled = true; });
+      try {
+        app.setState(await api('/me', { method: 'PATCH', body: { mapVisible: choice === 'true' } }));
+        markVisibilityChosen();
+        overlay.remove();
+        resolve();
+      } catch (err) {
+        toast(err.message, 'warn');
+        buttons.forEach((button) => { button.disabled = false; });
+      }
     });
   });
 }
@@ -184,6 +184,11 @@ export function mount(el) {
     <p class="map-credit" id="map-credit" hidden></p>
     <p class="map-status" id="map-status" aria-live="polite">Loading map…</p>
     <div class="map-profile" id="map-profile" role="dialog" aria-label="Player" hidden></div>
+    <div class="map-zoom" role="group" aria-label="Zoom">
+      <button data-zoom="1" aria-label="Zoom in">+</button>
+      <button data-zoom="-1" aria-label="Zoom out">-</button>
+    </div>
+    <button class="map-recenter" id="map-recenter" aria-label="Back to your location" hidden>${icons.back}</button>
     <div class="map-controls">
       <button class="btn btn-primary" id="map-walk"></button>
       ${app.demo ? '<button class="btn btn-demo" id="map-demo">Demo Walk</button>' : ''}
@@ -209,6 +214,8 @@ export function mount(el) {
   let nearbyTimer = null;
   // The player being looked at; the camera leaves the buddy for them until closed.
   let focusId = null;
+  // The camera follows the buddy (or the player being looked at) until the map is dragged.
+  let following = true;
   let savedZoom = null;
   let busy = false;
 
@@ -222,14 +229,6 @@ export function mount(el) {
     $('map-walk').className = `btn ${walk.walking ? 'btn-pink' : 'btn-primary'}`;
   }
 
-  // Other players only show up while you walk.
-  let wasWalking = walk.walking;
-  const onWalkChange = () => {
-    updateCard();
-    if (walk.walking === wasWalking) return;
-    wasWalking = walk.walking;
-    refreshNearby().catch((err) => console.error('[nearby]', err.message));
-  };
 
   function setStatus(text) {
     $('map-status').textContent = text;
@@ -279,7 +278,6 @@ export function mount(el) {
       await walk.stop();
       return;
     }
-    if (await chooseWalkVisibility() === null) return;
     try {
       await walk.start();
     } catch {
@@ -301,7 +299,6 @@ export function mount(el) {
 
   async function demoWalk() {
     if (demoTimer) return;
-    if (!walk.walking && await chooseWalkVisibility() === null) return;
     $('map-demo').disabled = true;
     demoStartedWalk = !walk.walking;
     if (demoStartedWalk) await walk.start({ motion: false });
@@ -323,18 +320,14 @@ export function mount(el) {
     }, DEMO_TICK_MS);
   }
 
-  // Shares where we are (GPS may not fire while standing still), then shows who is around.
+  // Shares where we are (GPS may not fire while standing still), then shows
+  // which friends are about. Waits for the player to say who may see them.
   async function refreshNearby() {
-    if (!walk.walking || !PlayerMarker) {
-      closePlayer();
-      for (const { marker } of nearby.values()) marker.remove();
-      nearby.clear();
-      return;
-    }
+    if (!PlayerMarker || !visibilityChosen()) return;
     const here = gps.status === 'tracking' || gps.simulating ? gps.position : app.demo ? { ...shown } : null;
     if (here) await gps.share(here);
     const { players } = await api(`/nearby${app.demo ? '?demo=1' : ''}`);
-    if (destroyed || !walk.walking) return; // the walk ended while this loaded
+    if (destroyed) return;
     const seen = new Set();
     for (const player of players) {
       seen.add(player.userId);
@@ -358,10 +351,19 @@ export function mount(el) {
     }
   }
 
+  // Glide from wherever the view is now back to the buddy or the player being looked at.
+  function follow() {
+    const center = map.getCenter();
+    Object.assign(look, { lat: center.lat(), lng: center.lng() });
+    following = true;
+    $('map-recenter').hidden = true;
+  }
+
   function openPlayer(id) {
     if (!nearby.has(id)) return;
     if (focusId === null) savedZoom = map.getZoom();
     focusId = id;
+    follow();
     map.setZoom(FOCUS_ZOOM);
     el.querySelector('.map-controls').hidden = true;
     const panel = $('map-profile');
@@ -384,7 +386,7 @@ export function mount(el) {
         <div class="opponent-info">
           <b>${escapeHtml(buddy.name)}</b>
           <span>${stageName(buddy)}</span>
-          <small>@${escapeHtml(profile.username)}${distance === undefined ? '' : ` · ${fmt(distance)} m away`}</small>
+          <small>@${escapeHtml(profile.username)}${distance === undefined ? '' : ` · ${fmtDistance(distance, { decimals: 1 })} away`}</small>
         </div>
         <button class="icon-btn" data-close-player aria-label="Close">X</button>
       </div>
@@ -402,6 +404,9 @@ export function mount(el) {
   function closePlayer() {
     if (focusId === null) return;
     focusId = null;
+    // The view stays on their spot; Recenter brings it back to you.
+    following = false;
+    $('map-recenter').hidden = false;
     if (savedZoom !== null) map.setZoom(savedZoom);
     savedZoom = null;
     $('map-profile').hidden = true;
@@ -445,6 +450,8 @@ export function mount(el) {
     map = new maps.Map($('map'), {
       center: { lat: shown.lat, lng: shown.lng },
       zoom: 18,
+      minZoom: 3, // far enough out to find friends in other cities
+      maxZoom: 21,
       ...(in3d
         ? { mapId: config.googleMapsMapId, renderingType: maps.RenderingType.VECTOR, colorScheme: 'DARK', tilt: 60, heading: -20 }
         : { styles: RETRO_STYLE }),
@@ -452,9 +459,13 @@ export function mount(el) {
       disableDefaultUI: true,
       clickableIcons: false,
       keyboardShortcuts: false,
-      // 3D: pinch, twist and tilt work and the camera re-centres on the buddy.
-      // Retro: the map is a fixed backdrop that scrolls under the buddy.
-      gestureHandling: in3d ? 'greedy' : 'none',
+      // Pinch zooms in both looks (3D also twists and tilts). Dragging moves the
+      // map freely until Recenter is tapped.
+      gestureHandling: 'greedy',
+    });
+    map.addListener('dragstart', () => {
+      following = false;
+      $('map-recenter').hidden = false;
     });
 
     // Every character on the map is a figure: your buddy and each nearby player.
@@ -558,7 +569,7 @@ export function mount(el) {
 
       update(player) {
         this.player = player;
-        this.button.setAttribute('aria-label', `${player.buddy.name}, @${player.username}, ${player.distanceM} m away`);
+        this.button.setAttribute('aria-label', `${player.buddy.name}, @${player.username}, ${fmtDistance(player.distanceM, { decimals: 1 })} away`);
         this.button.innerHTML = `<span>Lv ${player.buddy.level} @${escapeHtml(player.username)}</span>`;
         this.draw();
       }
@@ -728,15 +739,17 @@ export function mount(el) {
 
       // Keep the camera on the buddy, or glide to the player being looked at;
       // zoom, heading and tilt stay as the player set them.
-      const goal = nearby.get(focusId)?.marker.figure.pos ?? shown;
-      if (focusId === null && distanceM(look, shown) < 2) {
-        Object.assign(look, { lat: shown.lat, lng: shown.lng });
-      } else {
-        const glide = 1 - Math.exp(-dt * 5);
-        look.lat += (goal.lat - look.lat) * glide;
-        look.lng += (goal.lng - look.lng) * glide;
+      if (following) {
+        const goal = nearby.get(focusId)?.marker.figure.pos ?? shown;
+        if (focusId === null && distanceM(look, shown) < 2) {
+          Object.assign(look, { lat: shown.lat, lng: shown.lng });
+        } else {
+          const glide = 1 - Math.exp(-dt * 5);
+          look.lat += (goal.lat - look.lat) * glide;
+          look.lng += (goal.lng - look.lng) * glide;
+        }
+        map.moveCamera({ center: { lat: look.lat, lng: look.lng } });
       }
-      map.moveCamera({ center: { lat: look.lat, lng: look.lng } });
       draw();
       frame = requestAnimationFrame(tick);
     };
@@ -748,17 +761,26 @@ export function mount(el) {
     const hit = (name) => event.target.closest(`[data-${name}]`)?.dataset[name];
     if (avatarButton) chooseAvatar(avatarButton.dataset.avatar);
     else if (event.target.closest('[data-close-player]')) closePlayer();
+    else if (hit('zoom')) map?.setZoom(map.getZoom() + Number(hit('zoom')));
+    else if (event.target.closest('#map-recenter') && map) {
+      closePlayer();
+      follow();
+      map.setZoom(map.getZoom() + 1); // a little closer on the way back
+    }
     else if (hit('fight')) exclusive(() => fight(Number(hit('fight'))));
     else if (event.target.closest('#map-walk')) toggleWalk().catch((err) => toast(err.message, 'warn'));
     else if (event.target.closest('#map-demo')) demoWalk().catch((err) => toast(err.message, 'warn'));
   };
   el.addEventListener('click', onClick);
-  walk.addEventListener('change', onWalkChange);
+  walk.addEventListener('change', updateCard);
   gps.addEventListener('fix', onFix);
   gps.addEventListener('status', onGpsStatus);
   updateCard();
   updateAvatarPicker();
   gps.open();
+  if (!visibilityChosen()) {
+    chooseMapVisibility().then(() => refreshNearby()).catch((err) => console.error('[nearby]', err.message));
+  }
   init().catch((err) => {
     console.error(err);
     if (!destroyed) showProblem(`${err.message}. Check your connection and reopen the Map tab.`);
@@ -776,7 +798,7 @@ export function mount(el) {
         if (demoStartedWalk) walk.stop();
       }
       el.removeEventListener('click', onClick);
-      walk.removeEventListener('change', onWalkChange);
+      walk.removeEventListener('change', updateCard);
       gps.removeEventListener('fix', onFix);
       gps.removeEventListener('status', onGpsStatus);
       gps.close();

@@ -4,9 +4,25 @@ import { api } from './api.js';
 import { GpsFilter, bearingDeg, distanceM } from './geo.js';
 import { walk } from './steps.js';
 
-// How often the position is shared, so nearby players see each other on the map.
+// How often the position is shared, so friends see each other on the map.
 const SHARE_EVERY_MS = 15_000;
 const SHARE_AFTER_M = 25;
+// Set once the player has said whether friends may see them; nothing is shared before.
+const CHOSEN_KEY = 'stepbuddy.mapVisibilityAsked';
+
+export function visibilityChosen() {
+  try {
+    return localStorage.getItem(CHOSEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function markVisibilityChosen() {
+  try {
+    localStorage.setItem(CHOSEN_KEY, '1');
+  } catch {}
+}
 
 class Gps extends EventTarget {
   /** Where the buddy should be: { lng, lat }, or null before the first fix. */
@@ -30,9 +46,7 @@ class Gps extends EventTarget {
     // Tracking outlives the Map tab during a walk (GPS keeps backing up the
     // step count on other tabs) and ends with the walk.
     walk.addEventListener('change', () => {
-      if (walk.walking) return;
-      this.#shared = null; // the server forgets you when a walk ends; share again right away next walk
-      if (!this.#mapOpen) this.stop();
+      if (!walk.walking && !this.#mapOpen) this.stop();
     });
   }
 
@@ -91,9 +105,12 @@ class Gps extends EventTarget {
     this.dispatchEvent(Object.assign(new Event('fix'), { teleport }));
   }
 
-  /** While walking, tells the server where the player is, at most every 15s unless they moved 25m. */
+  /**
+   * While the map is open or a walk is on, tells the server where the player
+   * is, at most every 15s unless they moved 25m.
+   */
   share(point) {
-    if (!walk.walking) return;
+    if (!(this.#mapOpen || walk.walking) || !visibilityChosen()) return;
     const now = Date.now();
     if (this.#shared && now - this.#shared.at < SHARE_EVERY_MS && distanceM(this.#shared.point, point) < SHARE_AFTER_M) return;
     this.#shared = { point, at: now };

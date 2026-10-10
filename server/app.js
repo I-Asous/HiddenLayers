@@ -29,9 +29,8 @@ const MIME = {
   '.glb': 'model/gltf-binary',
 };
 const MAX_SESSION_STEPS = 200_000;
-// Players show up on each other's maps within this distance, while their
+// Friends show up on each other's maps, wherever they are, while their
 // position is this fresh.
-const NEARBY_RADIUS_M = 1000;
 const NEARBY_FRESH_MS = 120_000;
 // Demo: where the seeded buddies stand around you, in metres [north, east].
 const DEMO_OFFSETS_M = [[60, 40], [-90, 70], [30, -120]];
@@ -385,8 +384,6 @@ export async function createApp({ dbFile, dataDir }) {
         }
         if (body.ended) {
           await tx.run('UPDATE walk_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?', [now, sessionId]);
-          // Friends only see you on their map while you walk.
-          await tx.run('DELETE FROM locations WHERE user_id = ?', [userId]);
         }
         return { added, earned };
       });
@@ -524,9 +521,8 @@ export async function createApp({ dbFile, dataDir }) {
       return { ok: true };
     },
 
-    // Friends who are walking near you and let friends see them. Measured from
-    // the caller's own shared position, so nobody can look up who is standing
-    // somewhere they are not.
+    // Friends who let friends see them and have shared a position lately,
+    // nearest first. Only for callers sharing their own position.
     'GET /api/nearby': async ({ userId, query }) => {
       const since = Date.now() - NEARBY_FRESH_MS;
       const me = await db.get('SELECT lat, lng FROM locations WHERE user_id = ? AND updated_at >= ?', [userId, since]);
@@ -541,8 +537,7 @@ export async function createApp({ dbFile, dataDir }) {
         JOIN friendships f ON f.user_id = ? AND f.friend_id = u.id
         WHERE u.map_visible = 1 AND l.updated_at >= ?
       `, [userId, since]))
-        .map((row) => toPlayer(row, row))
-        .filter((player) => player.distanceM <= NEARBY_RADIUS_M);
+        .map((row) => toPlayer(row, row));
       if (query.get('demo') === '1') {
         const metresPerDegree = 111_320;
         for (const [i, username] of DEMO_USERNAMES.entries()) {
