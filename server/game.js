@@ -104,3 +104,9 @@ export const COSMETICS = [
   { id: 'bg-city', slot: 'background', name: 'City', price: 30 },
   { id: 'bg-space', slot: 'background', name: 'Space', price: 50 },
 ];
+
+export const COIN_PACKAGES = [
+  { id: 'starter', name: 'Starter Stack', coins: 100, priceCents: 99 },
+  { id: 'adventurer', name: 'Adventurer Chest', coins: 550, priceCents: 499, popular: true },
+  { id: 'legend', name: 'Legend Hoard', coins: 1200, priceCents: 999 },
+];

@@ -12,7 +12,7 @@ import {
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
+  COIN_PACKAGES, MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
 test('evolution stages follow level bands', () => {
@@ -265,6 +265,18 @@ test('store: buy once, equip only what you own', async () => {
   assert.equal(worn.data.buddy.equipped.hat, 'party-hat');
   const off = await call('POST', '/buddy/equip', { slot: 'hat', itemId: null });
   assert.equal(off.data.buddy.equipped.hat, null);
+});
+
+test('store: coin packages credit the wallet without trusting the client amount', async () => {
+  const before = (await call('GET', '/me')).data.user.coins;
+  const list = await call('GET', '/store');
+  assert.deepEqual(list.data.coinPackages.map(({ id }) => id), COIN_PACKAGES.map(({ id }) => id));
+
+  const purchase = await call('POST', '/store/buy-coins', { packageId: COIN_PACKAGES[0].id, coins: 999999 });
+  assert.equal(purchase.status, 200);
+  assert.equal(purchase.data.purchased.coins, COIN_PACKAGES[0].coins);
+  assert.equal(purchase.data.user.coins, before + COIN_PACKAGES[0].coins);
+  assert.equal((await call('POST', '/store/buy-coins', { packageId: 'unknown' })).status, 404);
 });
 
 test('levelling across a stage boundary evolves the buddy', async () => {
