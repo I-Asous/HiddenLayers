@@ -28,10 +28,9 @@ const DEFAULT_DIAMOND_PACKAGES = [
   { id: 'diamonds_750', name: 'Diamond Vault', diamonds: 750, priceCents: 999, popular: false },
 ];
 
-const VIEW_TITLES = { store: 'Store', diamonds: 'Diamonds', wardrobe: 'Wardrobe', beasts: 'Beasts' };
-
 export function mount(el) {
   let view = 'store';
+  let storeCategory = 'accessories';
   let items = null;
   let eggs = null;
   let diamondPackages = null;
@@ -76,7 +75,7 @@ export function mount(el) {
 
   function storeHtml() {
     const { points } = app.state.user;
-    return `<h3>Eggs</h3>${eggsHtml()}<h3>Cosmetics</h3><div class="grid">${items.map((item) => `
+    return `<div class="grid">${items.map((item) => `
       <article class="item ${item.owned ? 'is-owned' : ''}">
         <div class="item-art">${cosmeticIcon(item)}${item.owned
           ? '<span class="stamp">Owned</span>'
@@ -215,6 +214,12 @@ export function mount(el) {
     const tab = event.target.closest('[data-view]');
     if (tab) {
       view = tab.dataset.view;
+      storeCategory = 'all';
+      return render();
+    }
+    const catBtn = event.target.closest('[data-cat]');
+    if (catBtn) {
+      storeCategory = catBtn.dataset.cat;
       return render();
     }
     const buyBtn = event.target.closest('[data-buy]');
