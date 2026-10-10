@@ -125,7 +125,7 @@ export function mount(el) {
           <div class="coin-pack-art diamond-pack-art">${diamondIcon}</div>
           <b>${escapeHtml(pack.name)}</b>
           <strong>${fmt(amount)} diamonds</strong>
-          <button class="btn btn-primary" data-buy-diamonds="${pack.id}">$${(pack.priceCents / 100).toFixed(2)} · Add diamonds</button>
+          <button class="btn btn-primary" data-buy-diamonds="${pack.id}">$${(pack.priceCents / 100).toFixed(2)}</button>
         </article>`;
       }).join('')}</div>`;
   }
