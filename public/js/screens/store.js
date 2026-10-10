@@ -1,0 +1,112 @@
+import { api } from '../api.js';
+import { buddySvg, cosmeticIcon } from '../buddy.js';
+import { escapeHtml, fmt, toast } from '../fx.js';
+import { app } from '../state.js';
+import { pointIcon } from './home.js';
+
+const SLOT_LABELS = { hat: 'Hats', eyewear: 'Eyewear', accessory: 'Accessories', background: 'Backgrounds' };
+
+export function mount(el) {
+  let view = 'store';
+  let items = null;
+  let busy = false;
+
+  function storeHtml() {
+    const { points } = app.state.user;
+    return `<div class="grid">${items.map((item) => `
+      <article class="item ${item.owned ? 'is-owned' : ''}">
+        <div class="item-art">${cosmeticIcon(item)}</div>
+        <b>${escapeHtml(item.name)}</b>
+        ${item.owned
+          ? '<span class="owned">Owned</span>'
+          : `<button class="btn btn-small ${points < item.price ? 'is-short' : 'btn-primary'}"
+              data-buy="${item.id}" aria-label="Buy ${escapeHtml(item.name)} for ${item.price} points">
+              ${pointIcon}${fmt(item.price)} · Buy</button>`}
+      </article>`).join('')}</div>`;
+  }
+
+  function wardrobeHtml() {
+    const { buddy } = app.state;
+    const owned = items.filter((item) => item.owned);
+    const slots = Object.entries(SLOT_LABELS).map(([slot, label]) => {
+      const inSlot = owned.filter((item) => item.slot === slot);
+      if (!inSlot.length) return '';
+      return `
+        <h3>${label}</h3>
+        <div class="grid grid-3">${inSlot.map((item) => {
+          const on = buddy.equipped[slot] === item.id;
+          return `
+            <button class="item item-tap ${on ? 'is-equipped' : ''}" data-equip="${item.id}" data-slot="${slot}"
+              aria-pressed="${on}">
+              <div class="item-art">${cosmeticIcon(item)}</div>
+              <b>${escapeHtml(item.name)}</b>
+              <span class="owned">${on ? 'Wearing' : 'Tap to wear'}</span>
+            </button>`;
+        }).join('')}</div>`;
+    }).join('');
+    return `
+      <div class="preview">${buddySvg(buddy, { className: 'is-idle' })}</div>
+      ${slots || '<p class="empty">Your wardrobe is empty. Buy something in the Store!</p>'}`;
+  }
+
+  function render() {
+    el.innerHTML = `
+      <header class="topbar">
+        <h1>${view === 'store' ? 'Store' : 'Wardrobe'}</h1>
+        <div class="balance">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+      </header>
+      <div class="segmented" role="tablist">
+        <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
+        <button role="tab" aria-selected="${view === 'wardrobe'}" data-view="wardrobe">Wardrobe</button>
+      </div>
+      ${items === null ? '<p class="empty">Loading…</p>' : view === 'store' ? storeHtml() : wardrobeHtml()}`;
+  }
+
+  async function buy(id) {
+    const item = items.find((i) => i.id === id);
+    const { points } = app.state.user;
+    if (points < item.price) {
+      toast(`You need ${fmt(item.price - points)} more Stride Points.`, 'warn');
+      return;
+    }
+    const result = await api('/store/buy', { method: 'POST', body: { itemId: id } });
+    items = result.items;
+    app.setState(result);
+    toast(`${item.name} is yours! Find it in your Wardrobe.`, 'good');
+  }
+
+  async function equip(id, slot) {
+    const wearing = app.state.buddy.equipped[slot] === id;
+    app.setState(await api('/buddy/equip', { method: 'POST', body: { slot, itemId: wearing ? null : id } }));
+  }
+
+  const onClick = async (event) => {
+    const tab = event.target.closest('[data-view]');
+    if (tab) {
+      view = tab.dataset.view;
+      return render();
+    }
+    const buyBtn = event.target.closest('[data-buy]');
+    const equipBtn = event.target.closest('[data-equip]');
+    if ((!buyBtn && !equipBtn) || busy) return;
+    busy = true;
+    try {
+      if (buyBtn) await buy(buyBtn.dataset.buy);
+      else await equip(equipBtn.dataset.equip, equipBtn.dataset.slot);
+    } catch (err) {
+      toast(err.message, 'warn');
+    } finally {
+      busy = false;
+    }
+  };
+  el.addEventListener('click', onClick);
+  render();
+  api('/store')
+    .then((data) => {
+      items = data.items;
+      render();
+    })
+    .catch((err) => toast(err.message, 'warn'));
+
+  return { update: render, destroy: () => el.removeEventListener('click', onClick) };
+}
