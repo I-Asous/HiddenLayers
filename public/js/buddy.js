@@ -464,6 +464,91 @@ const BACKGROUNDS = {
     ${r(4, 4, 3, 3, C.silver)}
     ${r(0, 27, 32, 5, C.slate)}${r(0, 27, 32, 1, C.silver)}
     ${r(4, 29, 3, 1, C.dusk)}${r(18, 30, 4, 1, C.dusk)}${r(26, 28, 2, 1, C.dusk)}`,
+  'bg-meadow': () => `
+    ${r(0, 0, 32, 32, C.sky)}${r(4, 3, 4, 4, C.yellow)}
+    ${r(17, 5, 8, 2, C.white)}${r(19, 4, 4, 1, C.white)}
+    ${steps(7, 16, 10, C.green)}${steps(25, 18, 8, C.green)}${steps(16, 20, 6, C.teal)}
+    ${r(0, 26, 32, 6, C.lime)}${r(0, 26, 32, 1, C.green)}
+    ${stars([[3, 28], [14, 30], [24, 28], [29, 30]], C.red)}${stars([[8, 30], [19, 28], [27, 29]], C.white)}
+    ${stars([[5, 30], [11, 28], [22, 30]], C.yellow)}`,
+  'bg-desert': () => `
+    ${r(0, 0, 32, 32, C.cyan)}${r(22, 3, 5, 5, C.white)}${r(23, 4, 3, 3, C.yellow)}
+    ${steps(8, 17, 9, C.orange)}${steps(22, 19, 7, C.orange)}
+    ${r(0, 26, 32, 6, C.yellow)}${r(0, 26, 32, 1, C.white)}
+    ${r(27, 16, 2, 10, C.green)}${r(25, 18, 1, 4, C.green)}${r(25, 21, 2, 1, C.green)}
+    ${r(30, 17, 1, 4, C.green)}${r(29, 20, 2, 1, C.green)}
+    ${stars([[4, 29], [13, 28], [20, 30], [9, 30]], C.orange)}`,
+  'bg-snow': () => `
+    ${r(0, 0, 32, 32, C.sky)}
+    ${steps(9, 9, 17, C.slate)}${steps(9, 9, 4, C.white)}${steps(25, 13, 13, C.dusk)}${steps(25, 13, 3, C.white)}
+    ${stars([[3, 3], [14, 5], [20, 2], [29, 7], [17, 10], [2, 12], [30, 16], [22, 8]])}
+    ${r(0, 26, 32, 6, C.white)}${r(0, 26, 32, 1, C.silver)}
+    ${stars([[5, 29], [16, 28], [26, 30]], C.silver)}`,
+  'bg-sunset': () => `
+    ${r(0, 0, 32, 6, C.plum)}${r(0, 6, 32, 6, C.red)}${r(0, 12, 32, 7, C.orange)}
+    ${r(12, 13, 8, 6, C.yellow)}${r(13, 12, 6, 1, C.yellow)}
+    ${r(2, 4, 6, 1, C.red)}${r(22, 8, 7, 1, C.orange)}
+    ${r(0, 19, 32, 7, C.navy)}${r(0, 19, 32, 1, C.blue)}
+    ${r(13, 20, 6, 1, C.yellow)}${r(14, 22, 4, 1, C.orange)}${r(15, 24, 2, 1, C.orange)}
+    ${r(0, 26, 32, 6, C.dusk)}${r(0, 26, 32, 1, C.slate)}`,
+  'bg-cave': () => `
+    ${r(0, 0, 32, 32, C.dusk)}
+    ${r(2, 0, 5, 3, C.night)}${r(3, 3, 3, 2, C.night)}${r(4, 5, 1, 2, C.night)}
+    ${r(12, 0, 4, 2, C.night)}${r(13, 2, 2, 2, C.night)}
+    ${r(20, 0, 6, 4, C.night)}${r(21, 4, 4, 2, C.night)}${r(22, 6, 2, 2, C.night)}${r(29, 0, 3, 3, C.night)}
+    ${r(3, 19, 3, 7, C.cyan)}${r(4, 17, 1, 2, C.cyan)}${r(3, 19, 1, 7, C.white)}
+    ${r(7, 22, 2, 4, C.sky)}${r(7, 21, 1, 1, C.sky)}
+    ${r(25, 18, 3, 8, C.cyan)}${r(26, 16, 1, 2, C.cyan)}${r(25, 18, 1, 8, C.white)}
+    ${r(22, 22, 2, 4, C.sky)}${r(29, 21, 2, 5, C.sky)}
+    ${stars([[10, 9], [17, 12], [28, 10], [8, 15]], C.cyan)}
+    ${r(0, 26, 32, 6, C.night)}${r(0, 26, 32, 1, C.slate)}`,
+  'bg-moonwood': () => `
+    ${r(0, 0, 32, 32, C.navy)}
+    ${r(21, 3, 5, 5, C.white)}${r(22, 2, 3, 7, C.white)}${r(23, 4, 1, 1, C.silver)}
+    ${stars([[3, 3], [9, 6], [14, 2], [29, 9], [6, 11], [17, 8]])}
+    ${steps(4, 9, 8, C.teal)}${steps(4, 14, 9, C.teal)}${steps(28, 10, 7, C.teal)}${steps(28, 15, 9, C.teal)}
+    ${steps(12, 15, 6, C.dusk)}${steps(20, 16, 6, C.dusk)}
+    ${r(0, 26, 32, 6, C.dusk)}${r(0, 26, 32, 1, C.teal)}
+    ${stars([[6, 29], [15, 28], [25, 30]], C.lime)}`,
+  'bg-reef': () => `
+    ${r(0, 0, 32, 32, C.blue)}${r(0, 0, 32, 5, C.sky)}${r(0, 5, 32, 1, C.cyan)}
+    ${stars([[4, 9], [5, 13], [27, 8], [26, 12], [28, 16], [15, 7], [9, 17]])}
+    ${r(18, 10, 3, 2, C.orange)}${r(21, 10, 1, 1, C.orange)}${r(17, 9, 1, 1, C.orange)}${r(17, 12, 1, 1, C.orange)}
+    ${r(8, 13, 3, 2, C.yellow)}${r(7, 13, 1, 1, C.yellow)}
+    ${r(2, 18, 2, 8, C.red)}${r(4, 20, 2, 2, C.red)}${r(0, 21, 2, 2, C.red)}${r(5, 18, 1, 3, C.red)}
+    ${r(27, 17, 2, 9, C.orange)}${r(29, 19, 2, 2, C.orange)}${r(25, 21, 2, 2, C.orange)}${r(30, 17, 1, 3, C.orange)}
+    ${r(9, 21, 1, 5, C.green)}${r(10, 19, 1, 4, C.green)}${r(22, 20, 1, 6, C.green)}${r(23, 22, 1, 3, C.green)}
+    ${r(0, 26, 32, 6, C.yellow)}${r(0, 26, 32, 1, C.white)}
+    ${stars([[6, 29], [18, 28], [25, 30]], C.orange)}`,
+  'bg-volcano': () => `
+    ${r(0, 0, 32, 9, C.night)}${r(0, 9, 32, 9, C.plum)}${r(0, 18, 32, 8, C.red)}
+    ${r(11, 2, 7, 2, C.slate)}${r(14, 0, 6, 2, C.slate)}${r(13, 4, 4, 2, C.dusk)}
+    ${steps(16, 8, 18, C.night)}${r(14, 8, 4, 2, C.orange)}${r(15, 7, 2, 1, C.yellow)}
+    ${r(15, 10, 2, 5, C.orange)}${r(16, 15, 2, 5, C.orange)}${r(15, 20, 2, 6, C.yellow)}
+    ${r(11, 14, 1, 4, C.orange)}${r(21, 13, 1, 5, C.orange)}
+    ${stars([[6, 6], [25, 4], [9, 11], [27, 10], [3, 14], [22, 7]], C.yellow)}
+    ${r(0, 26, 32, 6, C.night)}${r(0, 26, 32, 1, C.orange)}
+    ${r(3, 29, 5, 1, C.orange)}${r(14, 30, 6, 1, C.yellow)}${r(24, 28, 4, 1, C.orange)}`,
+  'bg-aurora': () => `
+    ${r(0, 0, 32, 32, C.night)}
+    ${stars([[2, 2], [10, 1], [19, 3], [28, 2], [6, 15], [30, 13], [15, 17], [23, 16]])}
+    ${r(0, 6, 8, 2, C.lime)}${r(8, 5, 8, 2, C.lime)}${r(16, 6, 8, 2, C.lime)}${r(24, 4, 8, 2, C.lime)}
+    ${r(0, 8, 8, 2, C.green)}${r(8, 7, 8, 2, C.green)}${r(16, 8, 8, 2, C.green)}${r(24, 6, 8, 2, C.green)}
+    ${r(0, 10, 8, 2, C.cyan)}${r(8, 9, 8, 2, C.cyan)}${r(16, 10, 8, 2, C.cyan)}${r(24, 8, 8, 2, C.cyan)}
+    ${r(0, 12, 8, 1, C.teal)}${r(8, 11, 8, 1, C.teal)}${r(16, 12, 8, 1, C.teal)}${r(24, 10, 8, 1, C.teal)}
+    ${steps(6, 17, 9, C.dusk)}${steps(6, 17, 2, C.white)}${steps(25, 15, 11, C.dusk)}${steps(25, 15, 3, C.white)}
+    ${r(0, 26, 32, 6, C.silver)}${r(0, 26, 32, 1, C.white)}
+    ${stars([[4, 29], [17, 28], [27, 30]], C.white)}`,
+  'bg-throne': () => `
+    ${r(0, 0, 32, 32, C.plum)}
+    ${r(13, 4, 6, 11, C.navy)}${r(14, 3, 4, 1, C.navy)}${r(15, 4, 2, 11, C.blue)}${r(13, 9, 6, 1, C.night)}
+    ${stars([[14, 6], [17, 12]], C.yellow)}
+    ${r(5, 3, 4, 13, C.red)}${r(5, 3, 4, 1, C.yellow)}${r(6, 16, 2, 1, C.red)}${r(6, 7, 2, 2, C.yellow)}
+    ${r(23, 3, 4, 13, C.red)}${r(23, 3, 4, 1, C.yellow)}${r(24, 16, 2, 1, C.red)}${r(24, 7, 2, 2, C.yellow)}
+    ${r(0, 0, 3, 27, C.dusk)}${r(29, 0, 3, 27, C.dusk)}${r(0, 0, 3, 2, C.yellow)}${r(29, 0, 3, 2, C.yellow)}
+    ${r(2, 0, 1, 27, C.slate)}${r(29, 0, 1, 27, C.slate)}
+    ${r(0, 26, 32, 6, C.dusk)}${r(0, 26, 32, 1, C.silver)}
+    ${r(8, 27, 16, 5, C.red)}${r(8, 27, 1, 5, C.yellow)}${r(23, 27, 1, 5, C.yellow)}`,
 };
 
 const DEFAULT_BG = () => `

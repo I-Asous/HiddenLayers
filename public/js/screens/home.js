@@ -4,6 +4,7 @@ import { buddySay, confetti, escapeHtml, fmt, toast, voice } from '../fx.js';
 import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
+import { openBeast } from './beast.js';
 import { openProfile } from './profile.js';
 import { diamondIcon } from './store.js';
 
@@ -20,19 +21,21 @@ function upgradeButton(type, icon, label, detail, cost, points) {
     </button>`;
 }
 
-const TEAM_SIZE = 6;
-
-// The player's beasts, the one walking with them first. Tapping another swaps to it.
+// Every beast the player owns, the one walking with them first. Tapping one
+// opens its card: its details, its name and personality to edit, and the
+// button to walk with it. A beast that lost a battle rests on its own.
 function teamHtml(buddy, resting) {
-  const slot = (beast, walking) => `
-    <button class="team-slot ${walking ? 'is-walking' : ''}" ${walking ? 'disabled' : `data-switch="${beast.id}"`}
-      aria-pressed="${walking}" aria-label="${escapeHtml(beast.name)}, ${stageName(beast)}, level ${beast.level}${
-        walking ? ', walking with you' : ''}">
+  const slot = (beast, walking) => {
+    const tired = beast.restingUntil > Date.now();
+    return `
+    <button class="team-slot ${walking ? 'is-walking' : ''} ${tired ? 'is-tired' : ''}" data-beast="${walking ? 'active' : beast.id}"
+      aria-label="${escapeHtml(beast.name)}, ${stageName(beast)}, level ${beast.level}${
+        walking ? ', walking with you' : ''}${tired ? ', resting after a lost battle' : ''}. View and edit">
       ${buddySvg(beast, { background: false })}
-      <span>Lv ${beast.level}</span>
+      <span>${tired ? 'Zzz' : `Lv ${beast.level}`}</span>
     </button>`;
-  return `<div class="team">${slot(buddy, true)}${
-    resting.slice(0, TEAM_SIZE - 1).map((beast) => slot(beast, false)).join('')}</div>`;
+  };
+  return `<div class="team">${slot(buddy, true)}${resting.map((beast) => slot(beast, false)).join('')}</div>`;
 }
 
 const WARDROBE_SLOTS = {
@@ -43,8 +46,9 @@ const WARDROBE_SLOTS = {
 };
 
 // The wardrobe sits right under the beast: pick a slot, then tap something the
-// player owns to put it on or take it off. items is null until the store answers.
-function wardrobeHtml(buddy, items, open) {
+// player owns to put it on or take it off. There is one of each item, so what
+// another beast is wearing is dimmed. items is null until the store answers.
+function wardrobeHtml(buddy, resting, items, open) {
   const tabs = Object.entries(WARDROBE_SLOTS).map(([slot, { tab, name }]) => `
     <button role="tab" aria-selected="${slot === open}" aria-label="Wardrobe: ${name}" data-slot="${slot}">${tab}</button>`);
   let shelf = '';
@@ -53,9 +57,12 @@ function wardrobeHtml(buddy, items, open) {
     shelf = owned.length
       ? `<div class="wardrobe-shelf">${owned.map((item) => {
         const on = buddy.equipped[open] === item.id;
+        const wearer = resting.find((beast) => beast.equipped[open] === item.id);
         return `
-          <button class="wardrobe-item ${on ? 'is-equipped' : ''}" data-equip="${item.id}" aria-pressed="${on}"
-            aria-label="${escapeHtml(item.name)}${on ? ', wearing' : ''}">${cosmeticIcon(item)}</button>`;
+          <button class="wardrobe-item ${on ? 'is-equipped' : ''} ${wearer ? 'is-taken' : ''}" data-equip="${item.id}"
+            aria-pressed="${on}" ${wearer ? `aria-disabled="true" data-wearer="${escapeHtml(wearer.name)}"` : ''}
+            aria-label="${escapeHtml(item.name)}${on ? ', wearing' : ''}${
+              wearer ? `, worn by ${escapeHtml(wearer.name)}` : ''}">${cosmeticIcon(item)}</button>`;
       }).join('')}</div>`
       : `<p class="wardrobe-empty">${items === null
         ? 'Opening the wardrobe…'
@@ -125,7 +132,7 @@ export function mount(el) {
           </button>
         </div>
         ${evolveHtml}
-        ${wardrobeHtml(buddy, items, wardrobeSlot)}
+        ${wardrobeHtml(buddy, resting, items, wardrobeSlot)}
       </section>
 
       <div class="upgrades">
@@ -168,19 +175,6 @@ export function mount(el) {
     }
   }
 
-  async function switchBeast(id) {
-    if (busy) return;
-    busy = true;
-    try {
-      app.setState(await api('/buddy/switch', { method: 'POST', body: { id } }));
-      toast(`${app.state.buddy.name} is walking with you now.`, 'good');
-    } catch (err) {
-      toast(err.message, 'warn');
-    } finally {
-      busy = false;
-    }
-  }
-
   // Tapping what the beast already wears takes it off.
   async function equip(id) {
     if (busy) return;
@@ -214,14 +208,17 @@ export function mount(el) {
   const onClick = (event) => {
     const upgradeBtn = event.target.closest('[data-upgrade]');
     if (upgradeBtn) return upgrade(upgradeBtn.dataset.upgrade);
-    const switchBtn = event.target.closest('[data-switch]');
-    if (switchBtn) return switchBeast(Number(switchBtn.dataset.switch));
+    const beastBtn = event.target.closest('[data-beast]');
+    if (beastBtn) return openBeast(beastBtn.dataset.beast === 'active' ? null : Number(beastBtn.dataset.beast));
     const slotBtn = event.target.closest('.wardrobe [data-slot]');
     if (slotBtn) {
       wardrobeSlot = slotBtn.dataset.slot === wardrobeSlot ? null : slotBtn.dataset.slot;
       return render();
     }
     const equipBtn = event.target.closest('[data-equip]');
+    if (equipBtn?.dataset.wearer) {
+      return toast(`${equipBtn.dataset.wearer} is wearing that. Take it off them first.`, 'warn');
+    }
     if (equipBtn) return equip(equipBtn.dataset.equip);
     const talkBtn = event.target.closest('#talk-btn');
     if (talkBtn && !talkBtn.disabled) return talk(talkBtn);
@@ -248,6 +245,10 @@ export function mount(el) {
       app.spoken = null;
       render();
     }
+    // Wake a beast in the team row once its rest is over.
+    const tired = [app.state.buddy, ...app.state.resting]
+      .filter((beast) => beast.restingUntil > Date.now()).length;
+    if (el.querySelectorAll('.team-slot.is-tired').length !== tired) render();
     const until = app.state?.buddy.moodUntil;
     if (until && until <= Date.now() && refreshedFor !== until) {
       refreshedFor = until;

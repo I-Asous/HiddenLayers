@@ -20,8 +20,8 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(port, () => {
-  console.log(`StepBuddy running at http://localhost:${port}  (demo mode: http://localhost:${port}/?demo=1)`);
+server.listen(port, '0.0.0.0', () => {
+  console.log(`StepBuddy running on port ${port} (demo mode: /?demo=1)`);
   if (!process.env.GEMINI_API_KEY) console.log('  GEMINI_API_KEY not set — buddy uses built-in lines');
   if (!process.env.GOOGLE_MAPS_API_KEY) console.log('  GOOGLE_MAPS_API_KEY not set — the Map tab will ask for one');
   if (!process.env.ELEVENLABS_API_KEY) console.log('  ELEVENLABS_API_KEY not set — buddy uses the browser voice');

@@ -10,7 +10,7 @@ export const DAY_MS = 86_400_000;
 // Tiger Data (Postgres) is used when TIGER_DATABASE_URL is set and reachable at
 // startup; otherwise SQLite. The choice is made here, once.
 export async function openDb(file) {
-  const url = process.env.TIGER_DATABASE_URL;
+  const url = process.env.DATABASE_URL || process.env.TIGER_DATABASE_URL;
   const db = (url && await openTiger(url)) || openSqlite(file);
   await seedCosmetics(db);
   await seedDemoUsers(db);
@@ -160,6 +160,12 @@ function openSqlite(file) {
   }
   if (!db.prepare('PRAGMA table_info(users)').all().some((col) => col.name === 'map_visible')) {
     db.exec('ALTER TABLE users ADD COLUMN map_visible INTEGER NOT NULL DEFAULT 1');
+  }
+  // When a beast that lost a battle can fight again; it travels with the beast.
+  for (const table of ['buddies', 'resting_buddies']) {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((col) => col.name === 'rest_until')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN rest_until INTEGER`);
+    }
   }
   if (!db.prepare('PRAGMA table_info(ready_lines)').all().some((col) => col.name === 'mood')) {
     db.exec('ALTER TABLE ready_lines ADD COLUMN mood TEXT');
@@ -331,6 +337,8 @@ const PG_SCHEMA = `
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS species TEXT NOT NULL DEFAULT 'dragon';
   ALTER TABLE buddies ADD COLUMN IF NOT EXISTS personality TEXT;
   ALTER TABLE ready_lines ADD COLUMN IF NOT EXISTS mood TEXT;
+  ALTER TABLE buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
+  ALTER TABLE resting_buddies ADD COLUMN IF NOT EXISTS rest_until BIGINT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 0 CHECK (coins >= 0);
   ALTER TABLE users ADD COLUMN IF NOT EXISTS map_visible INTEGER NOT NULL DEFAULT 1;
 `;

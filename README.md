@@ -15,18 +15,19 @@ StepBuddy is a mobile-first web app (installable as a PWA) with a small Node ser
 | **Map** | Watch your buddy walk on a real map of where you are, following your GPS. |
 | **Store** | Spend points on upgrades and cosmetics, and pick up coin packs. |
 | **Battle** | Challenge friends or nearby players, and climb the leaderboards. |
-| **Stats** | Your week of steps, your streak and your daily goal. |
+| **Profile** | Tap your name on Home: battle record, walking stats, step-history charts, your daily goal and recent battles. |
 
 ### Growing your buddy
 - Every **100 steps = 1 Stride Point**. Leftover steps carry over.
 - The buddy evolves as it levels: **Egg → Baby (Lv 5) → Teen (Lv 10) → Adult (Lv 20)**.
 - Upgrades cost points: level costs 10 × level, and attack and evasion cost 5 × their current value.
 - Cosmetics fill four slots: hat, eyewear, accessory and background.
+- There are 14 background scenes. Ten cost Stride Points; the rare and legendary ones (Coral Reef, Volcano, Aurora, Throne Room) cost diamonds only.
 
 ### Battles
 - Fights go until one beast is knocked out. Each buddy acts once per round, and the higher evasion stat gives a better chance of dodging.
 - The buddy that deals the most total damage wins. A win pays **+5 Stride Points**.
-- Lose a battle you started and your buddy has to rest before the next one. The rest gets longer with every level (+5s each) and at each evolution: egg 30s, baby 1 min, teen 2 min, adult 4 min.
+- Lose a battle you started and that beast has to rest before its next one; your other beasts stay ready. The rest gets longer with every level (+5s each) and at each evolution: egg 30s, baby 1 min, teen 2 min, adult 4 min.
 - Each species throws its own punch, and every miss has its own sound effect.
 
 ### Mood
@@ -77,7 +78,7 @@ server/
 public/
   index.html, manifest.webmanifest, sw.js   PWA shell and offline cache
   js/app.js     tab router
-  js/screens/   home, walk, map, store, battle, stats, profile
+  js/screens/   home, walk, map, store, battle, profile, beast
   js/steps.js   accelerometer step counter
   js/gps.js     live location for the map
   js/fx.js      confetti, voice playback, sound effects
