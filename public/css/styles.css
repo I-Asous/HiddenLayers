@@ -719,7 +719,7 @@ input::placeholder { color: var(--slate); }
 .stamp { right: 6px; padding: 3px 6px; background: var(--lime); color: var(--dark); font-size: 8px; text-transform: uppercase; }
 .item.is-owned { border-color: var(--lime); }
 .item-art .buddy { width: 76%; }
-.price-tag .diamond-icon { width: auto; height: auto; font-size: 12px; background: none; border: 0; box-shadow: none; }
+.price-tag .diamond-icon { width: 14px; height: 14px; }
 .rarity { font-family: var(--pixel); font-size: 8px; text-transform: uppercase; color: var(--muted); }
 .rarity[data-rarity='uncommon'] { color: var(--lime); }
 .rarity[data-rarity='rare'] { color: var(--cyan); }
