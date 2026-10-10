@@ -5,6 +5,7 @@ import { icons } from '../icons.js';
 import { app } from '../state.js';
 import { walk } from '../steps.js';
 import { openProfile } from './profile.js';
+import { diamondIcon } from './store.js';
 
 const NEXT_STAGE = { egg: ['baby', 1, 5], baby: ['teen', 5, 10], teen: ['adult', 10, 20] };
 
@@ -64,7 +65,10 @@ export function mount(el) {
           <span class="chip-text"><b>${escapeHtml(user.username)}</b>
             <small>${record.wins}W · ${record.losses}L</small></span>
         </button>
-        <div class="balance" aria-label="${user.points} Stride Points">${pointIcon}<b>${fmt(user.points)}</b></div>
+        <div class="topbar-balances">
+          <div class="balance" aria-label="${user.points} Stride Points">${pointIcon}<b>${fmt(user.points)}</b></div>
+          <div class="balance balance-diamonds" aria-label="${app.diamonds} Diamonds">${diamondIcon}<b>${fmt(app.diamonds)}</b></div>
+        </div>
       </header>
 
       <section class="stage-card">

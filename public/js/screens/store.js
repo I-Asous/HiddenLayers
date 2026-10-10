@@ -11,7 +11,7 @@ const STORE_CATS = [
   { id: 'background',  label: 'Backgrounds', slots: ['background'] },
   { id: 'creature',    label: 'Creatures' },
 ];
-const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+export const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
   <!-- outline -->
   <path d="M3 0h2v1h1v1h1v1h1v1h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-1h1v-1h1v-1h1z" fill="#1a1c2c"/>
   <!-- body -->
@@ -139,10 +139,8 @@ export function mount(el) {
   }
 
   function diamondsHtml() {
-    const currentDiamonds = app.diamonds;
     return `
       <section class="coin-hero diamond-hero">
-        <div class="coin-balance diamond-balance">${diamondIcon}<span><small>Your diamond balance</small><b>${fmt(currentDiamonds)}</b></span></div>
         <p>Use diamonds for special offers and future upgrades. This demo purchase adds diamonds instantly.</p>
       </section>
       <div class="coin-grid diamond-grid">${diamondPackages.map((pack) => {
@@ -165,7 +163,10 @@ export function mount(el) {
     el.innerHTML = `
       <header class="topbar">
         <h1>${title}</h1>
-        <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+        <div class="topbar-balances">
+          <div class="balance" aria-label="${app.state.user.points} Stride Points">${pointIcon}<b>${fmt(app.state.user.points)}</b></div>
+          <div class="balance balance-diamonds" aria-label="${app.diamonds} Diamonds">${diamondIcon}<b>${fmt(app.diamonds)}</b></div>
+        </div>
       </header>
       <div class="segmented" role="tablist">
         <button role="tab" aria-selected="${view === 'store'}" data-view="store">Store</button>
