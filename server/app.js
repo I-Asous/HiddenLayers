@@ -9,8 +9,8 @@ import {
 } from './ai.js';
 import { DAY_MS, dayLabel, localDay, openDb, stepsByDay, transaction } from './db.js';
 import {
-  BATTLE_WIN_BONUS, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor,
-  upgradeCosts,
+  BATTLE_WIN_BONUS, COIN_PACKAGES, SLOTS, SPECIES, UPGRADES, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel,
+  streakFor, upgradeCosts,
 } from './game.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -151,7 +151,7 @@ export async function createApp({ dbFile, dataDir }) {
     const { mood, moodUntil } = await moodContext(userId, tz);
     return {
       user: {
-        id: user.id, username: user.username, points: user.points,
+        id: user.id, username: user.username, points: user.points, coins: user.coins,
         totalSteps: user.total_steps, dailyGoal: user.daily_goal,
       },
       buddy: {
@@ -174,12 +174,22 @@ export async function createApp({ dbFile, dataDir }) {
     if (changes !== 1) throw new HttpError(402, 'Not enough Stride Points');
   }
 
+  function validUsername(value) {
+    const username = String(value ?? '').trim();
+    if (!/^[a-zA-Z0-9_]{2,20}$/.test(username)) {
+      throw new HttpError(400, 'Username must be 2–20 letters, numbers or underscores');
+    }
+    return username;
+  }
+
   const routes = {
+    // Public: sign-up checks the name is free before the player picks a beast.
+    'GET /api/username': async ({ query }) => ({
+      available: !await db.get('SELECT id FROM users WHERE username = ?', [validUsername(query.get('name'))]),
+    }),
+
     'POST /api/login': async ({ body, tz }) => {
-      const username = String(body.username ?? '').trim();
-      if (!/^[a-zA-Z0-9_]{2,20}$/.test(username)) {
-        throw new HttpError(400, 'Username must be 2–20 letters, numbers or underscores');
-      }
+      const username = validUsername(body.username);
       const buddyName = String(body.buddyName ?? '').trim().slice(0, 16) || 'Buddy';
       const species = SPECIES.includes(body.species) ? body.species : SPECIES[0];
       // No preset picked ("Surprise me") leaves it NULL for ensurePersonality to invent.
@@ -187,6 +197,10 @@ export async function createApp({ dbFile, dataDir }) {
       const token = randomBytes(24).toString('hex');
       const userId = await transaction(db, async (tx) => {
         let user = await tx.get('SELECT id FROM users WHERE username = ?', [username]);
+        // The login screen asks for one or the other, so a typo can't hatch a
+        // second buddy and a taken name can't drop a new player into an old account.
+        if (body.mode === 'login' && !user) throw new HttpError(404, 'No buddy found for that username');
+        if (body.mode === 'signup' && user) throw new HttpError(409, 'That username already has a buddy');
         if (!user) {
           const { id } = await tx.run('INSERT INTO users (username, created_at) VALUES (?, ?) RETURNING id', [username, Date.now()]);
           await tx.run('INSERT INTO buddies (user_id, name, species, personality) VALUES (?, ?, ?, ?)',
@@ -324,7 +338,10 @@ export async function createApp({ dbFile, dataDir }) {
       return state(userId, tz);
     },
 
-    'GET /api/store': async ({ userId }) => ({ items: await storeItems(userId) }),
+    'GET /api/store': async ({ userId }) => ({
+      items: await storeItems(userId),
+      coinPackages: COIN_PACKAGES,
+    }),
 
     'POST /api/store/buy': async ({ userId, body, tz }) => {
       await transaction(db, async (tx) => {
@@ -337,6 +354,15 @@ export async function createApp({ dbFile, dataDir }) {
           [userId, item.id, Date.now()]);
       });
       return { items: await storeItems(userId), ...await state(userId, tz) };
+    },
+
+    'POST /api/store/buy-coins': async ({ userId, body, tz }) => {
+      const pack = COIN_PACKAGES.find(({ id }) => id === body.packageId);
+      if (!pack) throw new HttpError(404, 'No such coin package');
+      await transaction(db, async (tx) => {
+        await tx.run('UPDATE users SET coins = coins + ? WHERE id = ?', [pack.coins, userId]);
+      });
+      return { purchased: pack, ...await state(userId, tz) };
     },
 
     'GET /api/opponents': async ({ userId }) => ({
@@ -542,7 +568,7 @@ export async function createApp({ dbFile, dataDir }) {
     if (!route) throw new HttpError(404, 'Not found');
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
     let userId = null;
-    if (url.pathname !== '/api/login' && url.pathname !== '/api/personalities') {
+    if (!['/api/login', '/api/personalities', '/api/username'].includes(url.pathname)) {
       const auth = token && await db.get('SELECT user_id FROM auth_tokens WHERE token = ?', [token]);
       if (!auth) throw new HttpError(401, 'Please sign in');
       userId = auth.user_id;

@@ -31,20 +31,41 @@ function tabFromHash() {
   return name in SCREENS ? name : 'home';
 }
 
-function showLogin() {
+// Remembered so a player who has signed in here before gets the short form.
+const USERNAME_KEY = 'stepbuddy.username';
+
+function lastUsername() {
+  try {
+    return localStorage.getItem(USERNAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const escapeAttr = (value) => value.replace(/[^A-Za-z0-9_]/g, '');
+
+const LOGIN_INTRO = {
+  login: 'Welcome back! Your buddy is waiting.',
+  signup: 'Hatch a mythical beast and raise it with every step you take.',
+  beast: 'Now choose the beast you will raise.',
+};
+
+// "login" asks returning players for just a username. New players get two
+// steps: "signup" picks a username that nobody has yet, then "beast" chooses
+// and names their beast.
+function showLogin(mode = lastUsername() ? 'login' : 'signup', username = lastUsername()) {
   current?.screen.destroy();
   current = null;
-  root.innerHTML = `
-    <main class="login">
-      <h1>StepBuddy</h1>
-      <p>Hatch a mythical beast and raise it with every step you take.</p>
-      <form id="login-form">
-        <label>Username
-          <input name="username" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_]+"
+  username = escapeAttr(username);
+  const usernameField = `
+        <label>${mode === 'signup' ? 'Choose a username' : 'Username'}
+          <input name="username" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_]+" value="${username}"
             autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="e.g. sam_walks">
-        </label>
+        </label>`;
+  const beastFields = `
+        <p class="hint hint-top">Username: ${username}</p>
         <fieldset class="species">
-          <legend>Choose your beast <small>(new players)</small></legend>
+          <legend>Choose your beast</legend>
           ${Object.entries(SPECIES).map(([id, species], i) => `
             <label class="species-option">
               <input type="radio" name="species" value="${id}" ${i === 0 ? 'checked' : ''}>
@@ -52,40 +73,76 @@ function showLogin() {
               <span>${species.name}</span>
             </label>`).join('')}
         </fieldset>
-        <label>Name your buddy <small>(new players)</small>
+        <label>Name your buddy
           <input name="buddyName" maxlength="16" autocomplete="off" placeholder="Buddy">
         </label>
-        <label>Personality <small>(new players)</small>
+        <label>Personality
           <select name="personality">
             <option value="" selected>Surprise me</option>
           </select>
-        </label>
-        <button class="btn btn-primary btn-block btn-xl">Start</button>
-        <p class="hint">No password needed. Returning? Just enter your username.</p>
+        </label>`;
+  root.innerHTML = `
+    <main class="login">
+      <h1>StepBuddy</h1>
+      <p>${LOGIN_INTRO[mode]}</p>
+      <form id="login-form">
+        ${mode === 'beast' ? beastFields : usernameField}
+        <button class="btn btn-primary btn-block btn-xl">${{ login: 'Log in', signup: 'Next', beast: 'Start' }[mode]}</button>
+        ${mode === 'beast' ? '' : '<p class="hint">No password needed.</p>'}
       </form>
+      <button class="btn btn-ghost btn-block" id="login-switch">
+        ${{ login: 'New here? Hatch a buddy', signup: 'Already have a buddy? Log in', beast: 'Back' }[mode]}
+      </button>
     </main>`;
-  api('/personalities').then(({ personalities }) => {
-    root.querySelector('[name=personality]')?.insertAdjacentHTML('beforeend', personalityOptions(personalities));
-  }).catch(() => {});
-  root.querySelector('#login-form').addEventListener('submit', async (event) => {
+  const form = root.querySelector('#login-form');
+  const typedUsername = () => form.elements.username?.value.trim() ?? username;
+  if (mode === 'beast') {
+    api('/personalities').then(({ personalities }) => {
+      root.querySelector('[name=personality]')?.insertAdjacentHTML('beforeend', personalityOptions(personalities));
+    }).catch(() => {});
+  }
+  root.querySelector('#login-switch').addEventListener('click', () => {
+    showLogin(mode === 'signup' ? 'login' : 'signup', typedUsername());
+  });
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const form = new FormData(event.target);
-    const button = event.target.querySelector('button');
+    const data = new FormData(form);
+    const button = form.querySelector('button');
     button.disabled = true;
     try {
+      if (mode === 'signup') {
+        const { available } = await api(`/username?name=${encodeURIComponent(typedUsername())}`);
+        if (available) return showLogin('beast', typedUsername());
+        toast('That username is taken. Try another one.', 'warn');
+        button.disabled = false;
+        return;
+      }
       const result = await api('/login', {
         method: 'POST',
         body: {
-          username: form.get('username').trim(),
-          buddyName: form.get('buddyName'),
-          species: form.get('species'),
-          personality: form.get('personality'),
+          mode: mode === 'login' ? 'login' : 'signup',
+          username: typedUsername(),
+          buddyName: data.get('buddyName'),
+          species: data.get('species'),
+          personality: data.get('personality'),
         },
       });
       setToken(result.token);
+      try {
+        localStorage.setItem(USERNAME_KEY, typedUsername());
+      } catch {}
       app.setState(result);
       showApp();
     } catch (err) {
+      if (err.status === 404 && mode === 'login') {
+        toast('No buddy with that username yet. Hatch one!', 'warn');
+        return showLogin('signup', typedUsername());
+      }
+      // Someone took the name while this player was choosing their beast.
+      if (err.status === 409 && mode === 'beast') {
+        toast('That username was just taken. Try another one.', 'warn');
+        return showLogin('signup', typedUsername());
+      }
       toast(err.message, 'warn');
       button.disabled = false;
     }
@@ -123,7 +180,7 @@ addEventListener('hashchange', () => {
   if (app.state) showTab(tabFromHash());
 });
 app.addEventListener('change', () => current?.screen.update());
-app.addEventListener('signedout', showLogin);
+app.addEventListener('signedout', () => showLogin());
 handleSignedOut(() => {
   walk.reset();
   app.clear();

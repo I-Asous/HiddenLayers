@@ -12,7 +12,7 @@ import {
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
 import {
-  MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
+  COIN_PACKAGES, MOODS, UPSET_MS, moodFor, pointsEarned, resolveBattle, stageForLevel, streakFor, upgradeCosts,
 } from '../server/game.js';
 
 test('evolution stages follow level bands', () => {
@@ -199,6 +199,22 @@ test('signing in again returns the same account', async () => {
   assert.equal(unknown.data.buddy.species, 'dragon');
 });
 
+test('the login screen can ask to only sign in or only sign up', async () => {
+  const missing = await call('POST', '/login', { username: 'nobody_here', mode: 'login' }, null);
+  assert.equal(missing.status, 404);
+  const taken = await call('POST', '/login', { username: 'walker', mode: 'signup' }, null);
+  assert.equal(taken.status, 409);
+
+  assert.equal((await call('GET', '/username?name=fresh', null, null)).data.available, true);
+  assert.equal((await call('GET', '/username?name=Walker', null, null)).data.available, false);
+  assert.equal((await call('GET', '/username?name=no%20spaces', null, null)).status, 400);
+
+  const created = await call('POST', '/login', { username: 'fresh', buddyName: 'Ash', species: 'phoenix', mode: 'signup' }, null);
+  assert.equal(created.data.buddy.species, 'phoenix');
+  const back = await call('POST', '/login', { username: 'fresh', mode: 'login' }, null);
+  assert.equal(back.data.buddy.name, 'Ash');
+});
+
 test('steps are never counted twice', async () => {
   const first = await call('POST', '/steps/sync', { sessionId: 'session-aaaa', total: 2550 });
   assert.equal(first.data.added, 2550);
@@ -265,6 +281,18 @@ test('store: buy once, equip only what you own', async () => {
   assert.equal(worn.data.buddy.equipped.hat, 'party-hat');
   const off = await call('POST', '/buddy/equip', { slot: 'hat', itemId: null });
   assert.equal(off.data.buddy.equipped.hat, null);
+});
+
+test('store: coin packages credit the wallet without trusting the client amount', async () => {
+  const before = (await call('GET', '/me')).data.user.coins;
+  const list = await call('GET', '/store');
+  assert.deepEqual(list.data.coinPackages.map(({ id }) => id), COIN_PACKAGES.map(({ id }) => id));
+
+  const purchase = await call('POST', '/store/buy-coins', { packageId: COIN_PACKAGES[0].id, coins: 999999 });
+  assert.equal(purchase.status, 200);
+  assert.equal(purchase.data.purchased.coins, COIN_PACKAGES[0].coins);
+  assert.equal(purchase.data.user.coins, before + COIN_PACKAGES[0].coins);
+  assert.equal((await call('POST', '/store/buy-coins', { packageId: 'unknown' })).status, 404);
 });
 
 test('levelling across a stage boundary evolves the buddy', async () => {
