@@ -10,7 +10,7 @@ export const DAY_MS = 86_400_000;
 // Tiger Data (Postgres) is used when TIGER_DATABASE_URL is set and reachable at
 // startup; otherwise SQLite. The choice is made here, once.
 export async function openDb(file) {
-  const url = process.env.TIGER_DATABASE_URL;
+  const url = process.env.DATABASE_URL || process.env.TIGER_DATABASE_URL;
   const db = (url && await openTiger(url)) || openSqlite(file);
   await seedCosmetics(db);
   await seedDemoUsers(db);
