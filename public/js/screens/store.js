@@ -5,7 +5,22 @@ import { app } from '../state.js';
 import { pointIcon } from './home.js';
 
 const SLOT_LABELS = { hat: 'Hats', eyewear: 'Eyewear', accessory: 'Accessories', background: 'Backgrounds' };
-const diamondIcon = '<span class="coin-icon diamond-icon" aria-hidden="true">💎</span>';
+const diamondIcon = `<svg class="diamond-icon" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
+  <!-- outline -->
+  <path d="M3 0h2v1h1v1h1v1h1v1h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-1h1v-1h1v-1h1z" fill="#1a1c2c"/>
+  <!-- body -->
+  <path d="M3 1h2v1h1v1h1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h1v-1h1z" fill="#5fcde4"/>
+  <!-- top facet (lighter) -->
+  <path d="M3 1h2v1h-2z" fill="#a8e4f0"/>
+  <!-- left facet -->
+  <path d="M3 2h1v2h-1v-1h-1v-1h1z" fill="#73c5d8"/>
+  <!-- right facet -->
+  <path d="M5 2h1v1h-1v1h-1v-2h1z" fill="#3db0c8"/>
+  <!-- bottom tip -->
+  <path d="M4 5h0v1h0z" fill="#3db0c8"/>
+  <!-- glint -->
+  <path d="M3 2h1v1h-1z" fill="#d6f4ff"/>
+</svg>`;
 
 const DEFAULT_DIAMOND_PACKAGES = [
   { id: 'diamonds_50', name: 'Handful of Diamonds', diamonds: 50, priceCents: 99, popular: false },
