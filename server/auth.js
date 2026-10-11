@@ -40,10 +40,27 @@ export function passwordProblem(password, confirmPassword, username) {
   return null;
 }
 
+// Each hash takes 32 MiB and ~100 ms of CPU, so only a few run at once and the
+// rest wait their turn: a flood of sign-ins can't exhaust the server's memory.
+const MAX_HASHING = 4;
+let hashing = 0;
+const waiting = [];
+async function oneAtATime(fn) {
+  if (hashing < MAX_HASHING) hashing++;
+  else await new Promise((resolve) => waiting.push(resolve)); // the finished hash hands over its slot
+  try {
+    return await fn();
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else hashing--;
+  }
+}
+
 export async function hashPassword(password) {
   const { N, r, p, keylen } = SCRYPT;
   const salt = randomBytes(16);
-  const hash = await scrypt(normalize(password), salt, keylen, { N, r, p, maxmem: maxmem(N, r) });
+  const hash = await oneAtATime(() => scrypt(normalize(password), salt, keylen, { N, r, p, maxmem: maxmem(N, r) }));
   return `scrypt$${N}$${r}$${p}$${salt.toString('base64')}$${hash.toString('base64')}`;
 }
 
@@ -51,9 +68,9 @@ export async function verifyPassword(password, stored) {
   const [scheme, N, r, p, salt, hash] = String(stored ?? '').split('$');
   if (scheme !== 'scrypt' || typeof password !== 'string' || password.length > PASSWORD_MAX * 4) return false;
   const expected = Buffer.from(hash, 'base64');
-  const actual = await scrypt(normalize(password), Buffer.from(salt, 'base64'), expected.length, {
+  const actual = await oneAtATime(() => scrypt(normalize(password), Buffer.from(salt, 'base64'), expected.length, {
     N: Number(N), r: Number(r), p: Number(p), maxmem: maxmem(Number(N), Number(r)),
-  });
+  }));
   return timingSafeEqual(actual, expected);
 }
 

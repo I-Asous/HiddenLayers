@@ -27,4 +27,7 @@ server.listen(PORT, '0.0.0.0', () => {
   if (!process.env.ELEVENLABS_API_KEY) console.log('  ELEVENLABS_API_KEY not set — buddy uses the browser voice');
   if (process.env.DEMO_MODE === '1') console.log('  DEMO_MODE is on — add ?demo=1 to the address for the demo shortcuts');
   console.log(process.env.ADMIN_KEY ? `  Admin dashboard: http://localhost:${PORT}/admin/` : '  ADMIN_KEY not set — the admin dashboard is off');
+  if (process.env.ADMIN_KEY && process.env.ADMIN_KEY.length < 24) {
+    console.warn('  ADMIN_KEY is shorter than 24 characters — use a long random key, it opens every account');
+  }
 });
