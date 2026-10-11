@@ -102,7 +102,7 @@ function box(size, centre, geometry) {
 const chunks = [];
 let byteLength = 0;
 const gltf = {
-  asset: { version: '2.0', generator: 'StepBuddy make-buddy-model' },
+  asset: { version: '2.0', generator: 'Wanderling make-buddy-model' },
   scene: 0,
   scenes: [{ nodes: [0] }],
   nodes: [], meshes: [], materials: [], animations: [], accessors: [], bufferViews: [], buffers: [],

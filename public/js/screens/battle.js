@@ -170,7 +170,7 @@ export function mount(el) {
       }, view)}
       ${view === 'ranks' ? '' : `<p class="hint hint-top">${escapeHtml(buddy.name)} ${elementTag(buddy.element)} has
         ${buddy.attack} attack and ${buddy.evasion} evasion. Strong against ${ELEMENT_LABELS[ELEMENT_BEATS[buddy.element]]},
-        weak against ${ELEMENT_LABELS[weakTo(buddy.element)]}. Win a battle to earn 5 bonus Stride Points.
+        weak against ${ELEMENT_LABELS[weakTo(buddy.element)]}. Win a battle to earn ${app.state.rules?.battleWinBonus ?? 5} bonus Stride Points.
         ${restLeft() > 0 ? `<span class="edge is-weak">Resting after a loss: ready in
           <span data-rest>${clock(restLeft())}</span>.${app.state.resting.some((b) => !b.restingUntil || b.restingUntil <= Date.now())
             ? ' <a href="#home">Switch to another beast</a> to keep battling.' : ''}</span>` : ''}</p>`}
@@ -481,6 +481,7 @@ export function playBattle(start) {
     // A loss also says how long the beast now has to rest.
     function resultFor(state) {
       const rest = (state.buddy.restingUntil ?? 0) - Date.now();
+      if (battle.outcome === 'win') return { ...RESULT.win, detail: `+${battle.bonus ?? 5} Stride Points` };
       if (battle.outcome !== 'loss' || rest <= 0) return RESULT[battle.outcome];
       return { ...RESULT.loss, detail: `${escapeHtml(battle.challenger.name)} rests for ${clock(rest)}` };
     }

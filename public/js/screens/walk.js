@@ -47,7 +47,7 @@ export function mount(el) {
     <button class="btn btn-block btn-xl" id="walk-toggle"></button>
     ${app.demo ? '<button class="btn btn-demo btn-block" id="demo-add">DEMO: +100k steps</button>' : ''}
 
-    <p class="hint">Keep StepBuddy open with your phone in your hand or pocket. Steps are counted from
+    <p class="hint">Keep Wanderling open with your phone in your hand or pocket. Steps are counted from
       the motion sensor and saved every 30 seconds.</p>`;
 
   const $ = (id) => el.querySelector(`#${id}`);

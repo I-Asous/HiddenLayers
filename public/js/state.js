@@ -2,9 +2,10 @@ import { api } from './api.js';
 import { walk } from './steps.js';
 
 class App extends EventTarget {
-  /** Latest server state: { user, buddy, resting, todaySteps, record }. Null when signed out. */
+  /** Latest server state: { user, buddy, resting, todaySteps, record, rules }. Null when signed out. */
   state = null;
-  demo = new URLSearchParams(location.search).get('demo') === '1';
+  /** Whether the server was started in demo mode (DEMO_MODE=1). It decides; the address alone can't. */
+  serverDemo = false;
   /** Something the buddy said out loud; shown in the Home speech bubble for a while. */
   spoken = null;
 
@@ -13,9 +14,15 @@ class App extends EventTarget {
     if (!data?.user) return;
     this.state = {
       user: data.user, buddy: data.buddy, resting: data.resting ?? [], todaySteps: data.todaySteps,
-      record: data.record,
+      record: data.record, rules: data.rules, announcement: data.announcement ?? null,
     };
+    this.serverDemo = data.demo === true;
     this.dispatchEvent(new Event('change'));
+  }
+
+  /** Demo shortcuts show with ?demo=1 in the address, and only on a server running in demo mode. */
+  get demo() {
+    return this.serverDemo && new URLSearchParams(location.search).get('demo') === '1';
   }
 
   clear() {

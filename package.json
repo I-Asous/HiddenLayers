@@ -2,7 +2,7 @@
   "name": "stepbuddy",
   "version": "1.0.0",
   "private": true,
-  "description": "StepBuddy — a virtual pet that grows the more you walk",
+  "description": "Wanderling — a virtual pet that grows the more you walk",
   "type": "module",
   "engines": {
     "node": ">=22.5"

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Wanderling Admin</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <!-- Shown until a working admin key is entered. -->
+  <main class="gate" id="gate" hidden>
+    <form id="key-form">
+      <h1>Wanderling Admin</h1>
+      <label for="key">Admin key</label>
+      <input id="key" type="password" autocomplete="current-password" required autofocus>
+      <button>Open dashboard</button>
+      <p class="note" id="gate-note">The key is ADMIN_KEY in the server's .env file.</p>
+    </form>
+  </main>
+
+  <main class="dashboard" id="dashboard" hidden>
+    <header>
+      <h1>Wanderling Admin</h1>
+      <div class="header-actions">
+        <button class="quiet" id="reload">Refresh</button>
+        <button class="quiet" id="lock">Lock</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs" role="tablist">
+      <button role="tab" data-tab="players">Players</button>
+      <button role="tab" data-tab="activity">Activity</button>
+      <button role="tab" data-tab="economy">Economy</button>
+      <button role="tab" data-tab="flags">Flags</button>
+      <button role="tab" data-tab="settings">Settings</button>
+      <button role="tab" data-tab="announce">Announce</button>
+      <button role="tab" data-tab="log">Log</button>
+    </nav>
+
+    <section id="tab-players" hidden>
+      <div class="totals" id="totals" aria-label="Totals"></div>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search players or beasts" aria-label="Search players or beasts">
+        <label class="check"><input type="checkbox" id="online-only"> Online only</label>
+        <label class="check"><input type="checkbox" id="hide-demo"> Hide demo accounts</label>
+        <span class="count" id="count"></span>
+        <button class="quiet" id="gift-all">Gift everyone</button>
+        <button class="quiet" id="export">Export CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr id="head"></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p class="note" id="empty" hidden>No players match.</p>
+    </section>
+
+    <section id="tab-activity" hidden></section>
+    <section id="tab-economy" hidden></section>
+    <section id="tab-flags" hidden></section>
+    <section id="tab-settings" hidden></section>
+    <section id="tab-announce" hidden></section>
+    <section id="tab-log" hidden></section>
+  </main>
+
+  <!-- One player, with everything that can be done to the account. -->
+  <dialog id="player" class="wide"></dialog>
+
+  <dialog id="gift">
+    <form id="gift-form" method="dialog">
+      <h2 id="gift-title"></h2>
+      <p class="note" id="gift-balance"></p>
+      <label for="gift-points">Stride Points</label>
+      <input id="gift-points" type="number" inputmode="numeric" min="0" max="1000000" step="1" placeholder="0">
+      <label for="gift-diamonds">Diamonds</label>
+      <input id="gift-diamonds" type="number" inputmode="numeric" min="0" max="1000000" step="1" placeholder="0">
+      <label class="check" id="gift-demo-row"><input type="checkbox" id="gift-demo"> Include demo accounts</label>
+      <p class="error" id="gift-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="quiet" id="gift-cancel">Cancel</button>
+        <button type="button" class="danger" id="gift-take">Take away</button>
+        <button id="gift-send">Give</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script type="module" src="admin.js"></script>
+</body>
+</html>

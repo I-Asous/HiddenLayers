@@ -4,11 +4,6 @@ import { api } from './api.js';
 export const escapeHtml = (value) =>
   String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/** The player's picture, or the first letter of their name when they have none. */
-export const avatarHtml = (user, className = '') => (user.avatar
-  ? `<img class="avatar ${className}" src="${escapeHtml(user.avatar)}" alt="">`
-  : `<span class="avatar ${className}">${escapeHtml(user.username[0].toUpperCase())}</span>`);
-
 export const fmt = (n) => Math.round(n).toLocaleString('en-US');
 
 // Distance units ('km' or 'mi') are a display preference kept on this device.
