@@ -21,20 +21,22 @@ import { playBattle } from './battle.js';
 import { pointIcon } from './home.js';
 
 const WASHINGTON_SQUARE_PARK = { lng: -73.99733, lat: 40.73082 };
-const STAGE_SCALE = { egg: 0.6, baby: 0.8, teen: 1.0, adult: 1.3 };
 // The model is about 1.7m tall, which is two pixels at street zoom. It is drawn
 // this many times larger so the buddy reads as a character among the buildings.
 const MODEL_SCALE = 9;
+// Each character is drawn by its evolution stage: bigger as it grows up.
+const STAGE_SCALE = { egg: 0.6, baby: 0.8, teen: 1.0, adult: 1.3 };
 const IDLE_AFTER_MS = 3000;
 const CROSSFADE_S = 0.4;
 // Further than this from its target the buddy jumps instead of sliding there.
 const TELEPORT_M = 200;
 const NEARBY_POLL_MS = 10_000;
 const FOCUS_ZOOM = 20;
-// Retro look: characters are full size at street zoom and shrink with the map
-// as it zooms out, down to this fraction so they can still be seen and tapped.
+// Retro look: characters are full size at street zoom and shrink as the map
+// zooms out (about 70% one level out), down to this fraction so they can
+// still be seen and tapped.
 const STREET_ZOOM = 18;
-const MIN_ZOOMED_OUT_SCALE = 0.3;
+const MIN_ZOOMED_OUT_SCALE = 0.5;
 // Seeded demo buddies walk a circle this big, this fast, around their spot.
 const DEMO_CIRCLE_M = 15;
 const DEMO_PACE_MPS = 1.3;
@@ -666,7 +668,8 @@ export function mount(el) {
       renderer.autoClear = false;
       renderer.setClearColor(0x000000, 0); // see-through until a character draws over the map
       renderer.setPixelRatio(2);
-      const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+      // Orthographic, so a character is the same size anywhere on screen.
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100, 100);
       camera.position.set(0, 7, 7);
       camera.lookAt(0, 0, 0);
       camera.updateMatrixWorld(); // the ray casts below need it before the first render
@@ -690,13 +693,16 @@ export function mount(el) {
           width = canvas.clientWidth;
           height = canvas.clientHeight;
           renderer.setSize(width, height, false);
-          // Characters stay the size they were in the old 260px box at 30°.
-          camera.aspect = width / height;
-          camera.fov = (2 * Math.atan(Math.tan((15 * Math.PI) / 180) * (height / 260)) * 180) / Math.PI;
+          // The same size the buddy was in the old 260px box at 30°: 260px for 2·|camera|·tan 15° units.
+          const unitsPerPx = (2 * Math.hypot(7, 7) * Math.tan((15 * Math.PI) / 180)) / 260;
+          Object.assign(camera, {
+            left: (-width / 2) * unitsPerPx, right: (width / 2) * unitsPerPx,
+            top: (height / 2) * unitsPerPx, bottom: (-height / 2) * unitsPerPx,
+          });
           camera.updateProjectionMatrix();
         }
         renderer.clear();
-        const zoomScale = Math.max(MIN_ZOOMED_OUT_SCALE, Math.min(1, 2 ** (map.getZoom() - STREET_ZOOM)));
+        const zoomScale = Math.max(MIN_ZOOMED_OUT_SCALE, Math.min(1, Math.SQRT2 ** (map.getZoom() - STREET_ZOOM)));
         for (const fig of figures) {
           fig.stand.scale.setScalar(fig.stageScale * zoomScale);
           const pixel = projection.fromLatLngToContainerPixel(new maps.LatLng(fig.pos.lat, fig.pos.lng));
