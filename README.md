@@ -1,6 +1,6 @@
 # Wanderling
 
-Link to demo: https://hiddenlayers-production.up.railway.app/
+Link to demo: https://wanderling.fit/
 
 A virtual pet that grows the more you walk.
 
