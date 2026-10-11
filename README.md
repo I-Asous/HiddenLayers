@@ -4,7 +4,7 @@ Link to demo: https://hiddenlayers-production.up.railway.app/
 
 A virtual pet that grows the more you walk.
 
-You hatch a mythical buddy (a **dragon**, **phoenix** or **kraken**) and raise it with real steps. Walking earns Stride Points. Spend them to level your buddy up, sharpen its attack and evasion, and dress it in cosmetics. Then take it into battle against your friends. Your buddy has an AI-generated personality and talks back with its own voice. It gets proud when you keep a streak going and sulks when you lose two fights in a row.
+You hatch a mythical buddy, a random egg from 23 species (dragons, phoenixes, krakens, kitsune, yetis and more), and raise it with real steps. Walking earns Stride Points. Spend them to level your buddy up, sharpen its attack and evasion, and dress it in cosmetics. Then take it into battle against your friends. Your buddy has an AI-generated personality and talks back with its own voice. It gets proud when you keep a streak going and sulks when you lose two fights in a row.
 
 Wanderling is a mobile-first web app (installable as a PWA) with a small Node server behind it.
 
@@ -28,7 +28,8 @@ Wanderling is a mobile-first web app (installable as a PWA) with a small Node se
 
 ### Battles
 - Fights go until one beast is knocked out. Each buddy acts once per round, and the higher evasion stat gives a better chance of dodging.
-- The buddy that deals the most total damage wins. A win pays **+5 Stride Points**.
+- A battle ends when one beast is knocked out. If neither is down after 30 rounds, the one with more HP left wins. A win pays **+5 Stride Points**.
+- Running away (or starting another battle mid-fight) counts as a loss and pays the opponent nothing.
 - Lose a battle you started and that beast has to rest before its next one; your other beasts stay ready. The rest gets longer with every level (+5s each) and at each evolution: egg 30s, baby 1 min, teen 2 min, adult 4 min.
 - Each species throws its own punch, and every miss has its own sound effect.
 
@@ -43,16 +44,35 @@ Requires **Node 22.5+**.
 
 ```bash
 npm install
-cp .env.example .env   # then fill in the keys you have (see below)
+touch .env             # then add the keys you have (template below)
 npm start              # or: npm run dev  (restarts on file changes)
 ```
 
 - App: http://localhost:3000
-- Demo mode: http://localhost:3000/?demo=1 (adds a **Demo Walk** button on the Map tab, so you can test without walking around)
+- Demo mode: set `DEMO_MODE=1` in `.env`, then open http://localhost:3000/?demo=1 (adds a **Demo Walk** button on the Map tab, so you can test without walking around). `?demo=1` alone does nothing.
 
 Demo opponents to battle or add as friends: `mira`, `theo`, `ana`. Adding a real player sends them a friend request to accept or decline; the demo accounts accept straight away, since nobody is there to answer.
 
 ### Environment variables
+
+Copy this into `.env` and fill in the ones you have:
+
+```bash
+PORT=
+DATA_DIR=
+DATABASE_URL=
+TIGER_DATABASE_URL=
+GEMINI_API_KEY=
+GEMINI_MODEL=
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+ELEVENLABS_MODEL=
+GOOGLE_MAPS_API_KEY=
+GOOGLE_MAPS_MAP_ID=
+DEMO_MODE=
+ADMIN_KEY=
+APP_ORIGIN=
+```
 
 Every key is optional. Each one you leave out swaps in a fallback, so the app still runs with an empty `.env`. Never commit your real `.env`. It's gitignored for a reason.
 
@@ -64,10 +84,9 @@ Every key is optional. Each one you leave out swaps in a fallback, so the app st
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL` | The buddy's voice | Browser speech |
 | `GOOGLE_MAPS_API_KEY` | The Map tab | Map tab asks for a key |
 | `GOOGLE_MAPS_MAP_ID` | Tilted 3D map with buildings | Flat retro-styled map |
-| `TIGER_DATABASE_URL` | Tiger Data (Postgres) as the database | Local SQLite |
+| `DATABASE_URL` / `TIGER_DATABASE_URL` | Postgres (e.g. Tiger Data) as the database; `DATABASE_URL` wins if both are set | Local SQLite |
 | `DEMO_MODE` | Set to `1` to allow the demo shortcuts (instant steps, simulated walk) for anyone who opens the app with `?demo=1` | Shortcuts off |
-| `ADMIN_KEY` | Turns on the admin dashboard at `/admin/` and is the key that opens it | Dashboard off |
-
+| `ADMIN_KEY` | Turns on the admin dashboard at `/admin/` and is the key that opens it. Use a long random key (the server warns under 24 characters) | Dashboard off |
 | `APP_ORIGIN` | The site's public address, e.g. `https://wanderling.up.railway.app`. Only needed if a proxy rewrites the `Host` header and every action starts failing with "Cross-site request" | Taken from the request |
 
 If `TIGER_DATABASE_URL` is set but unreachable at startup (for example, the service is paused), the server logs it and falls back to SQLite.
@@ -92,7 +111,8 @@ The key is separate from player accounts and is the only thing guarding the dash
 - **Sessions** are random tokens in an `HttpOnly`, `SameSite=Strict` cookie that lasts a year. Over HTTPS the cookie is also `Secure` and named with the `__Host-` prefix. The database stores only a SHA-256 hash of each token, so a database leak can't be used to sign in.
 - **Every API call needs a valid session**, except sign-up, login, the username check and the personality list. Voice clips need one too.
 - **Forged requests are refused.** Anything that changes data must carry the `x-wanderling` header and come from the site's own origin.
-- **Brute force is limited.** After 10 wrong passwords a username is locked for 15 minutes, and each address gets 30 sign-in or sign-up attempts per 15 minutes.
+- **Brute force is limited.** After 10 wrong passwords a username is locked for 15 minutes, each address gets 30 sign-in or sign-up attempts per 15 minutes, and 20 wrong admin keys per 15 minutes. Only 4 password hashes run at once, so a flood of sign-ins can't exhaust memory.
+- **Location sharing is opt-in.** New players are hidden from friends' maps until they turn it on (Profile or the Map tab).
 - **Response headers:** a Content Security Policy, plus anti-framing, `nosniff` and HSTS over HTTPS.
 - **Accounts from before passwords** have no password, so nobody can sign into them. The device that still holds such an account's old sign-in can use it once to set a password. Demo players (`mira`, `theo`, `ana`) can't be signed into.
 
@@ -103,7 +123,10 @@ The code lives in `server/auth.js`.
 ```
 server/
   index.js      entry point: loads .env, opens the DB, starts the HTTP server
-  app.js        routes (/api/...), static files, session checks
+  app.js        HTTP server: sessions, rate limits, admin key check, static files
+  context.js    what the routes share: player state, battles in progress, spending, the buddy's memory
+  routes/       the /api/... routes by area: auth, buddy, walk, store, social, battles
+  http-error.js the error type routes throw to answer with a status
   auth.js       password hashing, session cookies, forged-request checks, rate limits, security headers
   game.js       pure game rules: points, levels, moods, battles, store items
   db.js         one interface over Tiger Data (Postgres) or SQLite, plus seeding
@@ -135,5 +158,6 @@ test/           node --test suite
 | `npm run model` | Regenerate the 3D buddy model |
 
 ## Notes
+- **Runs as a single instance.** Battles in progress, rate limits and "online now" are kept in the server's memory: run one instance, and expect a restart (any deploy) to drop battles in progress and reset the limits.
 - Coin packs are a **demo purchase**: buying one adds coins instantly, and no payment is taken.
 - After changing frontend files, bump `CACHE` in `public/sw.js` so installed copies pick up the new version.

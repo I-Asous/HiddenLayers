@@ -13,7 +13,7 @@ import {
   BUDDY_EVENTS, MOOD_STYLES, PERSONALITY_PRESETS, VOICES, allSpeechDone, buddyLine, cleanLine, stripTags,
 } from '../server/ai.js';
 import { createApp } from '../server/app.js';
-import { hashToken } from '../server/auth.js';
+import { hashPassword, hashToken, verifyPassword } from '../server/auth.js';
 import {
   COIN_PACKAGES, COSMETICS, EGGS, ELEMENT_BEATS, MAX_ROUNDS, MOODS, SPECIES, UPSET_MS, canUse, elementOf, matchup, moodFor, newBattle,
   opponentMove, pointsEarned, resolveRound, restAfterLoss, stageForLevel, streakFor, upgradeCosts,
@@ -743,9 +743,18 @@ test('battles are played a move at a time, then recorded and the winner is paid'
 
 test('running away, or starting another battle, loses the one in progress', async () => {
   const runner = (await signup('runner')).data.token;
+  const pointsOf = (userId) => {
+    const db = new DatabaseSync(dbFile);
+    const { points } = db.prepare('SELECT points FROM users WHERE id = ?').get(userId);
+    db.close();
+    return points;
+  };
+  const opponentPoints = pointsOf(1);
   const first = (await call('POST', '/battles', { opponentId: 1 }, runner)).data.battle;
   const fled = await call('POST', '/battles/forfeit', { battleId: first.id }, runner);
   assert.deepEqual(fled.data.record, { wins: 0, losses: 1, draws: 0 });
+  // The loss counts, but running away pays the opponent nothing, so it can't be farmed.
+  assert.equal(pointsOf(1), opponentPoints);
   // Forfeiting again, or a battle that isn't running, changes nothing.
   assert.deepEqual((await call('POST', '/battles/forfeit', { battleId: first.id }, runner)).data.record, fled.data.record);
 
@@ -1294,6 +1303,7 @@ test('admin: fixing accounts, handing things out, tuning the game, and a log of 
     const refused = await login('reformed');
     assert.deepEqual([refused.status, refused.data.error], [403, 'This account is suspended']);
     assert.equal(await listed(), false);
+    assert.equal((await call('POST', '/battles', { opponentId: rule.id }, bystander.auth)).status, 404);
     assert.ok(!(await call('GET', '/leaderboard?scope=all', null, bystander.auth)).data.entries.some((e) => e.username === 'reformed'));
     assert.equal((await admin('POST', '/admin/suspend', { userId: 1, suspended: true })).status, 409);
     await admin('POST', '/admin/suspend', { userId: rule.id, suspended: false });
@@ -1474,6 +1484,11 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   const far = await signUp('far_walker');
   const stale = await signUp('stale_walker');
   const stranger = await signUp('stranger');
+  // New players are hidden until they choose to show up on friends' maps.
+  assert.equal(near.user.mapVisible, false);
+  for (const other of [near, far, stale, stranger]) {
+    assert.equal((await call('PATCH', '/me', { mapVisible: true }, other.token)).data.user.mapVisible, true);
+  }
   // A friend request only counts once they accept it.
   const me = (await call('GET', '/me')).data.user;
   const befriend = async (other) => {
@@ -1487,6 +1502,10 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   // Nothing shared yet: you see nobody.
   assert.deepEqual((await call('GET', '/nearby')).data.players, []);
 
+  // While hidden your position isn't kept, so you see nobody either.
+  await call('POST', '/location', park);
+  assert.deepEqual((await call('GET', '/nearby')).data.players, []);
+  await call('PATCH', '/me', { mapVisible: true });
   await call('POST', '/location', park);
   await call('POST', '/location', { lat: park.lat + 0.0027, lng: park.lng }, near.token); // ~300m north
   await call('POST', '/location', { lat: park.lat + 0.045, lng: park.lng }, far.token); // ~5km north
@@ -1514,6 +1533,9 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
   await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.0005 }, stranger.token);
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+  // ...and they don't see their friends while hidden.
+  assert.equal(new DatabaseSync(dbFile).prepare('SELECT 1 FROM locations WHERE user_id = ?').get(stranger.user.id), undefined);
+  assert.deepEqual((await call('GET', '/nearby', null, stranger.token)).data.players, []);
 
   // Demo mode adds only the seeded buddies you are friends with.
   await call('POST', '/friends', { username: 'ana' }); // 409 if already friends; either way, friends
@@ -1527,6 +1549,16 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   // Friends who stop walking stay on the map while their position is fresh.
   await call('POST', '/steps/sync', { sessionId: 'near-walk-0001', total: 0, ended: true }, near.token);
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+});
+
+test('talking is limited per player per hour', async () => {
+  const chatty = (await signup('chatty')).data.token;
+  for (let i = 0; i < 60; i++) assert.equal((await call('POST', '/talk', { event: 'chat' }, chatty)).status, 200);
+  assert.equal((await call('POST', '/talk', { event: 'chat' }, chatty)).status, 429);
+  // A new personality is written by the AI too, so it shares the budget.
+  assert.equal((await call('PATCH', '/me', { personality: 'coach' }, chatty)).status, 429);
+  // Other players aren't affected.
+  assert.equal((await call('POST', '/talk', { event: 'chat' })).status, 200);
 });
 
 test('a player profile shows their buddy and record', async () => {
@@ -1543,4 +1575,30 @@ test('a player profile shows their buddy and record', async () => {
 
 test('requests without a session are rejected', async () => {
   assert.equal((await call('GET', '/me', null, null)).status, 401);
+});
+
+test('password hashing runs a few at a time, and every check still answers right', async () => {
+  const stored = await hashPassword('right-password-1');
+  const guesses = Array.from({ length: 10 }, (_, i) => (i % 2 ? 'right-password-1' : `wrong-password-${i}`));
+  const results = await Promise.all(guesses.map((guess) => verifyPassword(guess, stored)));
+  assert.deepEqual(results, guesses.map((guess) => guess === 'right-password-1'));
+});
+
+test('admin keys can\'t be guessed', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'stepbuddy-limits-'));
+  const app = await createApp({ dbFile: path.join(dir, 'test.db'), dataDir: dir, adminFailuresPerIp: 2 });
+  await new Promise((resolve) => app.listen(0, resolve));
+  const at = `http://localhost:${app.address().port}/api`;
+  const admin = async (key) => (await fetch(`${at}/admin/players`, { headers: { 'x-admin-key': key } })).status;
+  const saved = process.env.ADMIN_KEY;
+  try {
+    process.env.ADMIN_KEY = 'test-admin-key';
+    assert.deepEqual([await admin('guess-1'), await admin('guess-2')], [401, 401]);
+    // Once over the limit, even the right key waits.
+    assert.equal(await admin('test-admin-key'), 429);
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_KEY;
+    else process.env.ADMIN_KEY = saved;
+    app.close();
+  }
 });
