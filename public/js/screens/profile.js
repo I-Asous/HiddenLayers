@@ -65,45 +65,52 @@ export async function openProfile() {
         <h2>${escapeHtml(user.username)}</h2>
         <button class="icon-btn" data-close aria-label="Close">X</button>
       </div>
-      <div class="sheet-section" id="player-stats">${statsHtml(walking)}</div>
-      <h3>Step history</h3>
-      <div class="sheet-section" id="charts"><p class="muted">Crunching your steps…</p></div>
-      <h3>Settings</h3>
-      <div class="setting">
-        <span class="setting-label">Distance units</span>
-        <div class="segmented" role="radiogroup" aria-label="Distance units">${[['km', 'Kilometres'], ['mi', 'Miles']].map(([value, label]) => `
-          <button type="button" role="radio" aria-checked="${distanceUnits() === value}" aria-selected="${distanceUnits() === value}"
-            data-units="${value}">${label}</button>`).join('')}
-        </div>
+      <div class="segmented" role="tablist" aria-label="Profile">
+        <button role="tab" aria-selected="true" data-profile-tab="stats">Stats</button>
+        <button role="tab" aria-selected="false" data-profile-tab="settings">Settings</button>
       </div>
-      <div class="setting">
-        <span class="setting-label">On friends' maps</span>
-        <div class="segmented" role="radiogroup" aria-label="On friends' maps">${[['true', 'Visible'], ['false', 'Hidden']].map(([value, label]) => `
-          <button type="button" role="radio" aria-checked="${String(user.mapVisible) === value}"
-            aria-selected="${String(user.mapVisible) === value}" data-map-visible="${value}">${label}</button>`).join('')}
-        </div>
+      <div class="profile-panel" data-panel="stats">
+        <div class="sheet-section" id="player-stats">${statsHtml(walking)}</div>
+        <h3>Step history</h3>
+        <div class="sheet-section" id="charts"><p class="muted">Crunching your steps…</p></div>
+        <h3>Recent battles</h3>
+        <ul class="history" id="history"><li class="muted">Loading…</li></ul>
       </div>
-      <div class="setting">
-        <span class="setting-label">Music</span>
-        <div class="segmented" role="radiogroup" aria-label="Music">${[[true, 'On'], [false, 'Off']].map(([value, label]) => `
-          <button type="button" role="radio" aria-checked="${musicSettings().on === value}"
-            aria-selected="${musicSettings().on === value}" data-music="${value}">${label}</button>`).join('')}
+      <div class="profile-panel" data-panel="settings" hidden>
+        <div class="setting">
+          <span class="setting-label">Distance units</span>
+          <div class="segmented" role="radiogroup" aria-label="Distance units">${[['km', 'Kilometres'], ['mi', 'Miles']].map(([value, label]) => `
+            <button type="button" role="radio" aria-checked="${distanceUnits() === value}" aria-selected="${distanceUnits() === value}"
+              data-units="${value}">${label}</button>`).join('')}
+          </div>
         </div>
-        <label class="volume">Volume
-          <input type="range" id="music-volume" min="0" max="100" step="5" value="${Math.round(musicSettings().level * 100)}"
-            ${musicSettings().on ? '' : 'disabled'}>
-        </label>
-      </div>
-      <form id="profile-form">
-        <label>Daily step goal
-          <input name="dailyGoal" type="number" inputmode="numeric" min="500" max="50000" step="100" required
-            value="${user.dailyGoal}">
-        </label>
-        <button class="btn btn-primary btn-block">Save</button>
-      </form>
-      <h3>Recent battles</h3>
-      <ul class="history" id="history"><li class="muted">Loading…</li></ul>
-      <button class="btn btn-ghost btn-block" id="signout">Sign out</button></div>`);
+        <div class="setting">
+          <span class="setting-label">On friends' maps</span>
+          <div class="segmented" role="radiogroup" aria-label="On friends' maps">${[['true', 'Visible'], ['false', 'Hidden']].map(([value, label]) => `
+            <button type="button" role="radio" aria-checked="${String(user.mapVisible) === value}"
+              aria-selected="${String(user.mapVisible) === value}" data-map-visible="${value}">${label}</button>`).join('')}
+          </div>
+        </div>
+        <div class="setting">
+          <span class="setting-label">Music</span>
+          <div class="segmented" role="radiogroup" aria-label="Music">${[[true, 'On'], [false, 'Off']].map(([value, label]) => `
+            <button type="button" role="radio" aria-checked="${musicSettings().on === value}"
+              aria-selected="${musicSettings().on === value}" data-music="${value}">${label}</button>`).join('')}
+          </div>
+          <label class="volume">Volume
+            <input type="range" id="music-volume" min="0" max="100" step="5" value="${Math.round(musicSettings().level * 100)}"
+              ${musicSettings().on ? '' : 'disabled'}>
+          </label>
+        </div>
+        <form id="profile-form">
+          <label>Daily step goal
+            <input name="dailyGoal" type="number" inputmode="numeric" min="500" max="50000" step="100" required
+              value="${user.dailyGoal}">
+          </label>
+          <button class="btn btn-primary btn-block">Save</button>
+        </form>
+        <button class="btn btn-ghost btn-block" id="signout">Sign out</button>
+      </div></div>`);
   const { overlay, close } = sheet;
 
   // A new goal or a change of units shows here straight away.
@@ -113,6 +120,13 @@ export async function openProfile() {
 
   app.addEventListener('change', redraw);
   sheet.onClose = () => app.removeEventListener('change', redraw);
+
+  overlay.querySelectorAll('[data-profile-tab]').forEach((tab) => tab.addEventListener('click', () => {
+    overlay.querySelectorAll('[data-profile-tab]').forEach((t) => t.setAttribute('aria-selected', t === tab));
+    overlay.querySelectorAll('[data-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.panel !== tab.dataset.profileTab;
+    });
+  }));
 
   // Applies straight away, no Save needed: it only changes how distances are shown.
   overlay.querySelectorAll('[data-units]').forEach((button) => button.addEventListener('click', () => {

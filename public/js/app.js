@@ -52,11 +52,22 @@ const PASSWORD_RULES = 'At least 8 characters, with a letter and a number.';
 
 // The same rules the server checks (server/auth.js), so most mistakes show
 // before anything is sent.
+// Copy of COMMON in server/auth.js. Keep the two in sync.
+const COMMON_PASSWORDS = new Set([
+  'password1', 'password12', 'password123', 'passw0rd', 'p4ssw0rd', 'qwerty123', 'qwerty1234', 'abc12345',
+  'abcd1234', 'iloveyou1', 'letmein1', 'welcome1', 'welcome123', 'monkey123', 'dragon123', 'football1',
+  'baseball1', 'superman1', 'trustno1', 'sunshine1', 'princess1', 'admin123', 'test1234', '1q2w3e4r',
+  '1qaz2wsx', 'zaq12wsx', 'a1b2c3d4', 'q1w2e3r4', 'asdf1234', 'zxcv1234', 'wanderling1', 'password1!',
+]);
+
+// Mirrors passwordProblem in server/auth.js, so step one catches what the server would refuse.
 function passwordProblem(password, confirm, username) {
-  if (password.length < 8) return 'Password must be at least 8 characters';
-  if (password.length > 128) return 'Password must be at most 128 characters';
-  if (!/\p{L}/u.test(password) || !/\p{N}/u.test(password)) return 'Password needs at least one letter and one number';
-  if (password.toLowerCase() === username.toLowerCase()) return 'Password can\'t be your username';
+  const p = password.normalize('NFKC');
+  if (p.length < 8) return 'Password must be at least 8 characters';
+  if (p.length > 128) return 'Password must be at most 128 characters';
+  if (!/\p{L}/u.test(p) || !/\p{N}/u.test(p)) return 'Password needs at least one letter and one number';
+  if (p.toLowerCase() === username.toLowerCase()) return 'Password can\'t be your username';
+  if (COMMON_PASSWORDS.has(p.toLowerCase())) return 'That password is too common. Pick something harder to guess';
   if (password !== confirm) return 'Passwords don\'t match';
   return null;
 }

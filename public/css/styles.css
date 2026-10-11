@@ -1163,7 +1163,8 @@ input::placeholder { color: var(--slate); }
 .record-4 .stat { gap: var(--s1); padding: var(--s2) var(--s1); min-width: 0; text-align: center; }
 .record-4 .stat b { font-size: 12px; }
 /* The profile reads top to bottom: a heading, then one thing per line, with room between sections. */
-.profile, .sheet-section { display: flex; flex-direction: column; gap: 14px; }
+.profile, .sheet-section, .profile-panel { display: flex; flex-direction: column; gap: 14px; }
+.profile-panel[hidden] { display: none; }
 .profile h3 { margin: var(--s4) 0 0; padding-top: var(--s4); border-top: 2px solid var(--panel-dim); }
 .profile .sheet-section > h3:first-child { margin-top: 0; }
 .stat-list { list-style: none; margin: 0; padding: 0; background: var(--bg); border: 2px solid var(--panel-dim); }
