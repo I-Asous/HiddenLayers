@@ -3,6 +3,7 @@
 import {
   MOOD_STYLES, PERSONALITY_PRESETS, buddyLine, isBuddyEvent, situationFor, startSpeech,
 } from '../ai.js';
+import { rateLimiter } from '../auth.js';
 import { presetById } from '../context.js';
 import { transaction } from '../db.js';
 import { SLOTS, UPGRADES, stageForLevel } from '../game.js';
@@ -19,6 +20,12 @@ export function createBuddyRoutes({
   db, ttsDir, getBuddy, state, moodContext, ensurePersonality, prepareLines, recall, remember, spendPoints,
   liveBattles, endBattle,
 }) {
+  // Talking and new personalities call paid AI APIs, so each player gets a budget.
+  const aiCalls = rateLimiter(60, 60 * 60_000);
+  const spendAiCall = (userId) => {
+    if (!aiCalls.hit(userId)) throw new HttpError(429, 'Your buddy needs a breather. Try again in a bit');
+  };
+
   return {
     'GET /api/me': ({ userId, tz }) => state(userId, tz),
 
@@ -35,6 +42,7 @@ export function createBuddyRoutes({
     }),
 
     'PATCH /api/me': async ({ userId, body, tz }) => {
+      if (body.personality !== undefined) spendAiCall(userId);
       if (body.dailyGoal !== undefined) {
         const goal = Number(body.dailyGoal);
         if (!Number.isInteger(goal) || goal < 500 || goal > 50_000) {
@@ -149,6 +157,7 @@ export function createBuddyRoutes({
     },
 
     'POST /api/talk': async ({ userId, body, tz }) => {
+      spendAiCall(userId);
       const event = body.event ?? 'chat';
       if (!isBuddyEvent(event)) throw new HttpError(400, 'Unknown event');
       const { week, goal, mood } = await moodContext(userId, tz);

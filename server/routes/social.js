@@ -75,6 +75,9 @@ export function createSocialRoutes({ db, record }) {
       if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
         throw new HttpError(400, 'Invalid location');
       }
+      // Hidden players keep no position, so they don't see friends' positions either.
+      const { map_visible } = await db.get('SELECT map_visible FROM users WHERE id = ?', [userId]);
+      if (!map_visible) return { ok: true };
       await db.run(`
         INSERT INTO locations (user_id, lat, lng, updated_at) VALUES (?, ?, ?, ?)
         ON CONFLICT (user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, updated_at = excluded.updated_at

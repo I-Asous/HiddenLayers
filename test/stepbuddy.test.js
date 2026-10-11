@@ -1502,6 +1502,10 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   // Nothing shared yet: you see nobody.
   assert.deepEqual((await call('GET', '/nearby')).data.players, []);
 
+  // While hidden your position isn't kept, so you see nobody either.
+  await call('POST', '/location', park);
+  assert.deepEqual((await call('GET', '/nearby')).data.players, []);
+  await call('PATCH', '/me', { mapVisible: true });
   await call('POST', '/location', park);
   await call('POST', '/location', { lat: park.lat + 0.0027, lng: park.lng }, near.token); // ~300m north
   await call('POST', '/location', { lat: park.lat + 0.045, lng: park.lng }, far.token); // ~5km north
@@ -1529,6 +1533,9 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
   await call('POST', '/location', { lat: park.lat, lng: park.lng + 0.0005 }, stranger.token);
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+  // ...and they don't see their friends while hidden.
+  assert.equal(new DatabaseSync(dbFile).prepare('SELECT 1 FROM locations WHERE user_id = ?').get(stranger.user.id), undefined);
+  assert.deepEqual((await call('GET', '/nearby', null, stranger.token)).data.players, []);
 
   // Demo mode adds only the seeded buddies you are friends with.
   await call('POST', '/friends', { username: 'ana' }); // 409 if already friends; either way, friends
@@ -1542,6 +1549,16 @@ test('nearby: friends anywhere who let friends see them, nearest first', async (
   // Friends who stop walking stay on the map while their position is fresh.
   await call('POST', '/steps/sync', { sessionId: 'near-walk-0001', total: 0, ended: true }, near.token);
   assert.deepEqual(await usernames(), ['far_walker', 'near_walker']);
+});
+
+test('talking is limited per player per hour', async () => {
+  const chatty = (await signup('chatty')).data.token;
+  for (let i = 0; i < 60; i++) assert.equal((await call('POST', '/talk', { event: 'chat' }, chatty)).status, 200);
+  assert.equal((await call('POST', '/talk', { event: 'chat' }, chatty)).status, 429);
+  // A new personality is written by the AI too, so it shares the budget.
+  assert.equal((await call('PATCH', '/me', { personality: 'coach' }, chatty)).status, 429);
+  // Other players aren't affected.
+  assert.equal((await call('POST', '/talk', { event: 'chat' })).status, 200);
 });
 
 test('a player profile shows their buddy and record', async () => {
